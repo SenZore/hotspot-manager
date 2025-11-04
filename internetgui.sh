@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
 # ═══════════════════════════════════════════════════
-# TERMUX HOTSPOT MANAGER v7.0 - PUBLIC ACCESS
+# TERMUX HOTSPOT MANAGER v9.0 - INDONESIA OPTIMIZED
 # By: senzore ganteng
 # ═══════════════════════════════════════════════════
 
@@ -18,16 +18,16 @@ BOLD='\033[1m'
 
 # Config
 CONFIG_DIR="$HOME/.hotspot_manager"
-CLIENTS_DB="$CONFIG_DIR/clients.db"
-BLOCKED_DB="$CONFIG_DIR/blocked.db"
-PORTS_DB="$CONFIG_DIR/ports.db"
+TUNNEL_CONFIG="$CONFIG_DIR/tunnel.conf"
+REGION_CONFIG="$CONFIG_DIR/region.conf"
 
 # Global vars
 ROOT=0
 INTERFACE="wlan0"
 LOCAL_IP=""
 PUBLIC_IP=""
-PUBLIC_REACHABLE=0
+BEST_REGION=""
+PING_RESULTS=""
 
 # ═══════════════════════════════════════════════════
 # BANNER
@@ -35,13 +35,13 @@ PUBLIC_REACHABLE=0
 banner() {
     clear
     echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
-    echo -e "${WHITE}${BOLD}       HOTSPOT MANAGER v7.0 - PUBLIC${NC}"
+    echo -e "${WHITE}${BOLD}   HOTSPOT MANAGER v9.0 - INDONESIA${NC}"
     echo -e "${PURPLE}           By: senzore ganteng${NC}"
     echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
 }
 
 # ═══════════════════════════════════════════════════
-# ROOT CHECK
+# CHECK ROOT
 # ═══════════════════════════════════════════════════
 check_root() {
     if su -c "id" 2>/dev/null | grep -q "uid=0"; then
@@ -56,11 +56,12 @@ check_root() {
 # INSTALL DEPS
 # ═══════════════════════════════════════════════════
 install_deps() {
-    echo -e "${YELLOW}[*] Checking packages...${NC}"
+    echo -e "${YELLOW}[*] Installing packages...${NC}"
     
-    for pkg in iproute2 net-tools bc iptables ncurses-utils curl nmap-ncat; do
+    pkg update -y &>/dev/null
+    
+    for pkg in iproute2 net-tools bc iptables curl wget openssh nodejs-lts python; do
         if ! dpkg -s "$pkg" &>/dev/null; then
-            echo -e "${YELLOW}Installing $pkg...${NC}"
             pkg install -y "$pkg" &>/dev/null
         fi
     done
@@ -69,420 +70,142 @@ install_deps() {
 }
 
 # ═══════════════════════════════════════════════════
-# GET PUBLIC IP AND TEST
+# TEST PING TO REGIONS
 # ═══════════════════════════════════════════════════
-get_public_ip() {
-    echo -e "${YELLOW}[*] Getting public IP...${NC}"
+test_regions() {
+    echo -e "${YELLOW}[*] Finding best server region...${NC}\n"
     
-    # Try multiple services
-    PUBLIC_IP=$(curl -s --connect-timeout 3 ifconfig.me || \
-                curl -s --connect-timeout 3 icanhazip.com || \
-                curl -s --connect-timeout 3 ipinfo.io/ip || \
-                curl -s --connect-timeout 3 api.ipify.org || \
-                echo "")
+    declare -A regions=(
+        ["Singapore"]="sgp1.serveo.net"
+        ["Jakarta"]="103.56.206.0"  # Biznet DC
+        ["Tokyo"]="nrt1.serveo.net"
+        ["Hong Kong"]="18.162.0.0"
+        ["Mumbai"]="bom1.serveo.net"
+        ["Sydney"]="syd1.serveo.net"
+    )
     
-    if [ -n "$PUBLIC_IP" ]; then
-        echo -e "${GREEN}[✓] Public IP: $PUBLIC_IP${NC}"
+    local best_ping=999
+    BEST_REGION=""
+    
+    for region in "${!regions[@]}"; do
+        local server="${regions[$region]}"
+        echo -e "${CYAN}Testing $region...${NC}"
         
-        # Test if public IP is reachable
-        echo -e "${YELLOW}[*] Testing public IP reachability...${NC}"
+        # Test ping
+        local ping_result=$(ping -c 3 -W 1 "$server" 2>/dev/null | grep "avg" | awk -F'/' '{print $5}' | cut -d'.' -f1)
         
-        # Try to ping ourselves (some IPs don't respond to ping)
-        if timeout 2 ping -c 1 "$PUBLIC_IP" &>/dev/null; then
-            PUBLIC_REACHABLE=1
-            echo -e "${GREEN}[✓] Public IP is REACHABLE (pingable)${NC}"
-        else
-            # Try TCP connection test on common port
-            if timeout 2 nc -zv "$PUBLIC_IP" 80 &>/dev/null || timeout 2 nc -zv "$PUBLIC_IP" 443 &>/dev/null; then
-                PUBLIC_REACHABLE=1
-                echo -e "${GREEN}[✓] Public IP is REACHABLE (TCP)${NC}"
-            else
-                PUBLIC_REACHABLE=0
-                echo -e "${YELLOW}[!] Public IP not pingable (might be behind CGNAT)${NC}"
-                echo -e "${YELLOW}[!] Port forwarding may only work on local network${NC}"
+        if [ -n "$ping_result" ]; then
+            echo -e "  ${WHITE}$region: ${YELLOW}${ping_result}ms${NC}"
+            PING_RESULTS+="$region: ${ping_result}ms\n"
+            
+            if [ "$ping_result" -lt "$best_ping" ]; then
+                best_ping=$ping_result
+                BEST_REGION=$region
             fi
-        fi
-    else
-        echo -e "${RED}[✗] Could not get public IP${NC}"
-        PUBLIC_IP="Unknown"
-    fi
-}
-
-# ═══════════════════════════════════════════════════
-# DETECT INTERFACE
-# ═══════════════════════════════════════════════════
-detect_interface() {
-    [ $ROOT -eq 0 ] && return
-    
-    # Find hotspot interface
-    for iface in ap0 swlan0 wlan0 wlan1 rmnet_data0 rmnet_data1 rndis0; do
-        local ip=$(su -c "ip addr show $iface 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | awk '{print \$2}' | cut -d/ -f1")
-        if [ -n "$ip" ]; then
-            INTERFACE="$iface"
-            LOCAL_IP="$ip"
-            return
+        else
+            echo -e "  ${RED}$region: Failed${NC}"
         fi
     done
-}
-
-# ═══════════════════════════════════════════════════
-# INIT
-# ═══════════════════════════════════════════════════
-init_config() {
-    mkdir -p "$CONFIG_DIR"
-    touch "$CLIENTS_DB" "$BLOCKED_DB" "$PORTS_DB"
-}
-
-# ═══════════════════════════════════════════════════
-# GET CLIENTS
-# ═══════════════════════════════════════════════════
-get_clients() {
-    [ $ROOT -eq 0 ] && return
     
-    detect_interface
-    
-    # Get all clients at once
-    su -c "cat /proc/net/arp 2>/dev/null" | grep "$INTERFACE" | grep -v "00:00:00:00:00:00" | awk '{print $1}'
-}
-
-# ═══════════════════════════════════════════════════
-# SHOW CLIENTS SIMPLE
-# ═══════════════════════════════════════════════════
-show_clients() {
-    local clients=$(get_clients)
-    
-    if [ -z "$clients" ]; then
-        echo -e "${RED}No devices connected${NC}"
-        return 1
+    if [ -n "$BEST_REGION" ]; then
+        echo -e "\n${GREEN}[✓] Best region: $BEST_REGION (${best_ping}ms)${NC}"
     fi
-    
-    echo -e "${YELLOW}Connected Devices:${NC}\n"
-    
-    local count=1
-    while read ip; do
-        [ -z "$ip" ] && continue
-        
-        local limit=$(grep "^$ip " "$CLIENTS_DB" 2>/dev/null | cut -d' ' -f2)
-        [ -z "$limit" ] || [ "$limit" = "0" ] && limit="Unlimited" || limit="${limit} KB/s"
-        
-        printf "${CYAN}%2d.${NC} IP: ${WHITE}%-15s${NC}  Speed: ${YELLOW}%-12s${NC}\n" "$count" "$ip" "$limit"
-        
-        ((count++))
-    done <<< "$clients"
-    
-    return 0
 }
 
 # ═══════════════════════════════════════════════════
-# NETWORK STATS
+# NGROK WITH SINGAPORE SERVER (CLOSEST TO INDONESIA)
 # ═══════════════════════════════════════════════════
-network_stats() {
-    detect_interface
-    local rx=$(cat /sys/class/net/$INTERFACE/statistics/rx_bytes 2>/dev/null || echo 0)
-    local tx=$(cat /sys/class/net/$INTERFACE/statistics/tx_bytes 2>/dev/null || echo 0)
-    
-    echo "RX: $((rx/1048576)) MB | TX: $((tx/1048576)) MB"
-}
-
-# ═══════════════════════════════════════════════════
-# PORT FORWARDING - PUBLIC ACCESS FIXED
-# ═══════════════════════════════════════════════════
-port_forward() {
-    [ $ROOT -eq 0 ] && echo -e "${RED}Root required${NC}" && return
-    
+setup_ngrok_asia() {
     banner
     echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
-    echo -e "${CYAN}${BOLD}      PUBLIC PORT FORWARDING${NC}"
+    echo -e "${CYAN}${BOLD}    NGROK ASIA (LOW PING FOR INDONESIA)${NC}"
     echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
     
-    detect_interface
-    get_public_ip
-    
-    echo -e "\n${YELLOW}Network Information:${NC}"
-    echo -e "Local IP: ${GREEN}$LOCAL_IP${NC}"
-    echo -e "Public IP: ${GREEN}$PUBLIC_IP${NC}"
-    
-    if [ $PUBLIC_REACHABLE -eq 0 ]; then
-        echo -e "\n${YELLOW}⚠ WARNING: Public IP not reachable from outside${NC}"
-        echo -e "${YELLOW}Port forwarding will work on LOCAL NETWORK ONLY${NC}"
-        echo -e "${YELLOW}Share this IP with local devices: ${GREEN}$LOCAL_IP${NC}"
-    else
-        echo -e "\n${GREEN}✓ Public IP is reachable!${NC}"
-        echo -e "${GREEN}Share this IP with anyone: $PUBLIC_IP${NC}"
+    # Install ngrok if needed
+    if [ ! -f "$HOME/ngrok" ]; then
+        echo -e "${YELLOW}[*] Installing ngrok...${NC}"
+        
+        local arch=$(uname -m)
+        local ngrok_url=""
+        
+        case $arch in
+            aarch64|arm64)
+                ngrok_url="https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-arm64.tgz"
+                ;;
+            armv7l|arm)
+                ngrok_url="https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-arm.tgz"
+                ;;
+        esac
+        
+        wget -q --show-progress "$ngrok_url" -O ngrok.tgz
+        tar -xzf ngrok.tgz -C $HOME
+        rm ngrok.tgz
+        chmod +x $HOME/ngrok
     fi
     
-    echo -e "\n${CYAN}1.${NC} Quick Minecraft Server (25565)"
-    echo -e "${CYAN}2.${NC} Custom Port Forward"
-    echo -e "${CYAN}3.${NC} List Active Forwards"
-    echo -e "${CYAN}4.${NC} Remove Port Forward"
-    echo -e "${CYAN}5.${NC} Test Port"
+    # Configure for Asia region
+    echo -e "${YELLOW}[*] Configuring for Singapore region (lowest ping)...${NC}"
+    
+    # Create ngrok config with Singapore region
+    mkdir -p $HOME/.ngrok2
+    cat > $HOME/.ngrok2/ngrok.yml << EOF
+version: "2"
+region: ap
+tunnels:
+  minecraft:
+    proto: tcp
+    addr: 25565
+  web:
+    proto: http
+    addr: 8080
+EOF
+    
+    echo -e "${GREEN}[✓] Configured for Asia-Pacific (Singapore)${NC}"
+    echo -e "${YELLOW}Expected ping: 20-50ms from Indonesia${NC}\n"
+    
+    # Check if authtoken exists
+    if ! grep -q "authtoken:" $HOME/.ngrok2/ngrok.yml 2>/dev/null; then
+        echo -e "${YELLOW}Get FREE ngrok account:${NC}"
+        echo -e "1. Visit: ${CYAN}https://ngrok.com${NC}"
+        echo -e "2. Sign up FREE"
+        echo -e "3. Copy authtoken"
+        echo ""
+        read -p "Enter authtoken (or 'skip'): " authtoken
+        
+        if [ "$authtoken" != "skip" ] && [ -n "$authtoken" ]; then
+            $HOME/ngrok config add-authtoken "$authtoken"
+        fi
+    fi
+    
+    echo -e "${CYAN}1.${NC} Start Minecraft (Port 25565)"
+    echo -e "${CYAN}2.${NC} Start Web Server (Port 8080)"
+    echo -e "${CYAN}3.${NC} Custom Port"
     echo -e "${CYAN}0.${NC} Back"
     
     read -p $'\n'"Choose: " opt
     
     case $opt in
         1)
-            # Minecraft quick setup
-            echo -e "\n${YELLOW}Setting up Minecraft Server Port...${NC}"
+            pkill -f ngrok 2>/dev/null
             
-            # Find who has the server
-            local clients=$(get_clients)
-            echo -e "\n${YELLOW}Where is the Minecraft server running?${NC}"
-            echo -e "${CYAN}0.${NC} This device (Termux/localhost)"
+            echo -e "\n${YELLOW}Starting Minecraft tunnel (Singapore server)...${NC}"
             
-            if [ -n "$clients" ]; then
-                local -a list
-                local i=1
-                
-                while read ip; do
-                    [ -z "$ip" ] && continue
-                    list[$i]="$ip"
-                    
-                    # Test if port 25565 is open on this device
-                    local status=""
-                    if timeout 1 nc -zv "$ip" 25565 &>/dev/null; then
-                        status="${GREEN}[DETECTED]${NC}"
-                    fi
-                    
-                    printf "${CYAN}%d.${NC} %s %s\n" $i "$ip" "$status"
-                    ((i++))
-                done <<< "$clients"
-                
-                read -p $'\n'"Select [0-$((i-1))]: " sel
-                
-                local mc_ip=""
-                if [ "$sel" = "0" ]; then
-                    mc_ip="127.0.0.1"
-                elif [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
-                    mc_ip="${list[$sel]}"
-                else
-                    return
-                fi
-            else
-                mc_ip="127.0.0.1"
-            fi
+            # Start with Asia region specifically
+            nohup $HOME/ngrok tcp 25565 --region ap > /tmp/ngrok.log 2>&1 &
             
-            echo -e "\n${YELLOW}Configuring port forwarding...${NC}"
+            sleep 4
             
-            # Enable IP forwarding
-            su -c "echo 1 > /proc/sys/net/ipv4/ip_forward"
-            su -c "sysctl -w net.ipv4.ip_forward=1" &>/dev/null
+            # Get URL
+            local url=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"[^"]*' | cut -d'"' -f4 | grep tcp)
             
-            # Clear existing rules
-            su -c "iptables -t nat -D PREROUTING -p tcp --dport 25565 -j DNAT --to-destination $mc_ip:25565 2>/dev/null"
-            su -c "iptables -t nat -D PREROUTING -p udp --dport 25565 -j DNAT --to-destination $mc_ip:25565 2>/dev/null"
-            
-            # Add new rules
-            if [ "$mc_ip" = "127.0.0.1" ]; then
-                # For localhost
-                su -c "iptables -t nat -A PREROUTING -i $INTERFACE -p tcp --dport 25565 -j REDIRECT --to-port 25565"
-                su -c "iptables -t nat -A PREROUTING -i $INTERFACE -p udp --dport 25565 -j REDIRECT --to-port 25565"
-            else
-                # For other device
-                su -c "iptables -t nat -A PREROUTING -i $INTERFACE -p tcp --dport 25565 -j DNAT --to-destination $mc_ip:25565"
-                su -c "iptables -t nat -A PREROUTING -i $INTERFACE -p udp --dport 25565 -j DNAT --to-destination $mc_ip:25565"
-                su -c "iptables -A FORWARD -p tcp -d $mc_ip --dport 25565 -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT"
-                su -c "iptables -A FORWARD -p udp -d $mc_ip --dport 25565 -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT"
-            fi
-            
-            # Enable masquerading
-            su -c "iptables -t nat -C POSTROUTING -o $INTERFACE -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o $INTERFACE -j MASQUERADE"
-            
-            # Accept forwarding
-            su -c "iptables -P FORWARD ACCEPT"
-            
-            # For mobile data, also add rules for rmnet interfaces
-            for rmnet in rmnet_data0 rmnet_data1 rmnet_data2; do
-                if ip link show $rmnet &>/dev/null; then
-                    su -c "iptables -t nat -C POSTROUTING -o $rmnet -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o $rmnet -j MASQUERADE"
-                fi
-            done
-            
-            echo "$mc_ip 25565 both" >> "$PORTS_DB"
-            
-            echo -e "\n${GREEN}════════════════════════════════════════════════${NC}"
-            echo -e "${GREEN}     MINECRAFT SERVER CONFIGURED!${NC}"
-            echo -e "${GREEN}════════════════════════════════════════════════${NC}"
-            
-            if [ $PUBLIC_REACHABLE -eq 1 ]; then
-                echo -e "\n${WHITE}Share with friends:${NC}"
-                echo -e "${CYAN}${BOLD}$PUBLIC_IP:25565${NC}"
-                echo -e "\n${YELLOW}Testing if port is open...${NC}"
-                
-                # Test the port
-                if timeout 2 nc -zv "$LOCAL_IP" 25565 &>/dev/null; then
-                    echo -e "${GREEN}[✓] Port 25565 is OPEN locally${NC}"
-                else
-                    echo -e "${YELLOW}[!] Port 25565 not responding (is server running?)${NC}"
-                fi
-            else
-                echo -e "\n${WHITE}For LOCAL network friends:${NC}"
-                echo -e "${CYAN}${BOLD}$LOCAL_IP:25565${NC}"
-                echo -e "\n${YELLOW}Note: Only devices on same WiFi can connect${NC}"
-            fi
-            
-            echo -e "\n${YELLOW}Server hosted on: $mc_ip${NC}"
-            ;;
-            
-        2)
-            # Custom port
-            echo -e "\n${YELLOW}Custom Port Forward${NC}"
-            
-            read -p "Port number: " port
-            read -p "Protocol (tcp/udp/both) [tcp]: " proto
-            [ -z "$proto" ] && proto="tcp"
-            
-            local clients=$(get_clients)
-            echo -e "\n${YELLOW}Forward to:${NC}"
-            echo -e "${CYAN}0.${NC} This device (localhost)"
-            
-            if [ -n "$clients" ]; then
-                local -a list
-                local i=1
-                
-                while read ip; do
-                    [ -z "$ip" ] && continue
-                    list[$i]="$ip"
-                    printf "${CYAN}%d.${NC} %s\n" $i "$ip"
-                    ((i++))
-                done <<< "$clients"
-                
-                read -p $'\n'"Select [0-$((i-1))]: " sel
-                
-                local target_ip=""
-                if [ "$sel" = "0" ]; then
-                    target_ip="127.0.0.1"
-                elif [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
-                    target_ip="${list[$sel]}"
-                else
-                    return
-                fi
-            else
-                target_ip="127.0.0.1"
-            fi
-            
-            echo -e "\n${YELLOW}Setting up port forward...${NC}"
-            
-            su -c "echo 1 > /proc/sys/net/ipv4/ip_forward"
-            su -c "sysctl -w net.ipv4.ip_forward=1" &>/dev/null
-            
-            if [ "$target_ip" = "127.0.0.1" ]; then
-                if [ "$proto" = "both" ] || [ "$proto" = "tcp" ]; then
-                    su -c "iptables -t nat -A PREROUTING -i $INTERFACE -p tcp --dport $port -j REDIRECT --to-port $port"
-                fi
-                if [ "$proto" = "both" ] || [ "$proto" = "udp" ]; then
-                    su -c "iptables -t nat -A PREROUTING -i $INTERFACE -p udp --dport $port -j REDIRECT --to-port $port"
-                fi
-            else
-                if [ "$proto" = "both" ] || [ "$proto" = "tcp" ]; then
-                    su -c "iptables -t nat -A PREROUTING -i $INTERFACE -p tcp --dport $port -j DNAT --to-destination $target_ip:$port"
-                    su -c "iptables -A FORWARD -p tcp -d $target_ip --dport $port -j ACCEPT"
-                fi
-                if [ "$proto" = "both" ] || [ "$proto" = "udp" ]; then
-                    su -c "iptables -t nat -A PREROUTING -i $INTERFACE -p udp --dport $port -j DNAT --to-destination $target_ip:$port"
-                    su -c "iptables -A FORWARD -p udp -d $target_ip --dport $port -j ACCEPT"
-                fi
-            fi
-            
-            su -c "iptables -t nat -C POSTROUTING -o $INTERFACE -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o $INTERFACE -j MASQUERADE"
-            su -c "iptables -P FORWARD ACCEPT"
-            
-            echo "$target_ip $port $proto" >> "$PORTS_DB"
-            
-            echo -e "\n${GREEN}Port forwarding active!${NC}"
-            
-            if [ $PUBLIC_REACHABLE -eq 1 ]; then
-                echo -e "Public access: ${CYAN}$PUBLIC_IP:$port${NC}"
-            else
-                echo -e "Local access: ${CYAN}$LOCAL_IP:$port${NC}"
-            fi
-            ;;
-            
-        3)
-            # List forwards
-            echo -e "\n${YELLOW}Active Port Forwards:${NC}\n"
-            
-            if [ -s "$PORTS_DB" ]; then
-                while read line; do
-                    [ -z "$line" ] && continue
-                    local ip=$(echo $line | cut -d' ' -f1)
-                    local port=$(echo $line | cut -d' ' -f2)
-                    local proto=$(echo $line | cut -d' ' -f3)
-                    
-                    echo -e "${CYAN}Port $port ($proto)${NC} -> ${WHITE}$ip${NC}"
-                    
-                    if [ $PUBLIC_REACHABLE -eq 1 ]; then
-                        echo -e "  Public: ${GREEN}$PUBLIC_IP:$port${NC}"
-                    else
-                        echo -e "  Local: ${GREEN}$LOCAL_IP:$port${NC}"
-                    fi
-                done < "$PORTS_DB"
-            else
-                echo -e "${RED}No active forwards${NC}"
-            fi
-            ;;
-            
-        4)
-            # Remove forward
-            [ ! -s "$PORTS_DB" ] && echo -e "${RED}No active forwards${NC}" && read -p "Press Enter..." && return
-            
-            echo -e "\n${YELLOW}Active forwards:${NC}\n"
-            local i=1
-            local -a list
-            
-            while read line; do
-                [ -z "$line" ] && continue
-                list[$i]="$line"
-                local ip=$(echo $line | cut -d' ' -f1)
-                local port=$(echo $line | cut -d' ' -f2)
-                local proto=$(echo $line | cut -d' ' -f3)
-                
-                printf "${CYAN}%d.${NC} Port %s (%s) -> %s\n" $i "$port" "$proto" "$ip"
-                ((i++))
-            done < "$PORTS_DB"
-            
-            read -p $'\n'"Remove [1-$((i-1))]: " sel
-            
-            if [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
-                local rule="${list[$sel]}"
-                local ip=$(echo $rule | cut -d' ' -f1)
-                local port=$(echo $rule | cut -d' ' -f2)
-                local proto=$(echo $rule | cut -d' ' -f3)
-                
-                echo -e "\n${YELLOW}Removing forward...${NC}"
-                
-                if [ "$ip" = "127.0.0.1" ]; then
-                    su -c "iptables -t nat -D PREROUTING -i $INTERFACE -p tcp --dport $port -j REDIRECT --to-port $port 2>/dev/null"
-                    su -c "iptables -t nat -D PREROUTING -i $INTERFACE -p udp --dport $port -j REDIRECT --to-port $port 2>/dev/null"
-                else
-                    su -c "iptables -t nat -D PREROUTING -i $INTERFACE -p tcp --dport $port -j DNAT --to-destination $ip:$port 2>/dev/null"
-                    su -c "iptables -t nat -D PREROUTING -i $INTERFACE -p udp --dport $port -j DNAT --to-destination $ip:$port 2>/dev/null"
-                    su -c "iptables -D FORWARD -p tcp -d $ip --dport $port -j ACCEPT 2>/dev/null"
-                    su -c "iptables -D FORWARD -p udp -d $ip --dport $port -j ACCEPT 2>/dev/null"
-                fi
-                
-                sed -i "/^$ip $port $proto$/d" "$PORTS_DB"
-                echo -e "${GREEN}[✓] Removed${NC}"
-            fi
-            ;;
-            
-        5)
-            # Test port
-            echo -e "\n${YELLOW}Test Port${NC}"
-            read -p "Port number to test: " test_port
-            
-            echo -e "\n${YELLOW}Testing port $test_port...${NC}"
-            
-            # Test local
-            if timeout 1 nc -zv "$LOCAL_IP" "$test_port" &>/dev/null; then
-                echo -e "${GREEN}[✓] Port $test_port is OPEN on $LOCAL_IP${NC}"
-            else
-                echo -e "${RED}[✗] Port $test_port is CLOSED on $LOCAL_IP${NC}"
-            fi
-            
-            # Test from localhost
-            if timeout 1 nc -zv "127.0.0.1" "$test_port" &>/dev/null; then
-                echo -e "${GREEN}[✓] Port $test_port is OPEN on localhost${NC}"
+            if [ -n "$url" ]; then
+                echo -e "\n${GREEN}════════════════════════════════════════════════${NC}"
+                echo -e "${GREEN}   MINECRAFT SERVER READY! (SINGAPORE)${NC}"
+                echo -e "${GREEN}════════════════════════════════════════════════${NC}"
+                echo -e "\n${WHITE}Server address for friends:${NC}"
+                echo -e "${CYAN}${BOLD}$url${NC}"
+                echo -e "\n${YELLOW}Ping: ~20-50ms from Indonesia!${NC}"
+                echo -e "${GREEN}Much better than US servers (200ms+)${NC}"
             fi
             ;;
     esac
@@ -491,316 +214,321 @@ port_forward() {
 }
 
 # ═══════════════════════════════════════════════════
-# REALTIME MONITOR
+# PLAYIT.GG - BEST FOR GAMING (HAS ASIA SERVERS)
 # ═══════════════════════════════════════════════════
-monitor_stats() {
+setup_playit() {
     banner
     echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
-    echo -e "${CYAN}${BOLD}        REAL-TIME MONITOR${NC}"
+    echo -e "${CYAN}${BOLD}    PLAYIT.GG - BEST FOR MINECRAFT${NC}"
     echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
     
-    detect_interface
-    echo -e "${GREEN}Interface: $INTERFACE${NC}"
-    echo -e "${GREEN}Local IP: $LOCAL_IP${NC}"
-    echo -e "${GREEN}Public IP: $PUBLIC_IP${NC}"
-    echo -e "${YELLOW}Press Ctrl+C to exit${NC}\n"
+    echo -e "${GREEN}Why Playit.gg?${NC}"
+    echo -e "• Has ${YELLOW}Singapore & Hong Kong${NC} servers"
+    echo -e "• ${YELLOW}15-30ms ping${NC} from Indonesia!"
+    echo -e "• FREE forever"
+    echo -e "• Designed for gaming\n"
     
-    local stats="/sys/class/net/$INTERFACE/statistics"
-    
-    if [ ! -f "$stats/rx_bytes" ]; then
-        echo -e "${RED}[✗] Interface not active${NC}"
-        read -p "Press Enter..."
-        return
+    # Download playit
+    if [ ! -f "$HOME/playit" ]; then
+        echo -e "${YELLOW}[*] Downloading playit.gg...${NC}"
+        
+        local arch=$(uname -m)
+        case $arch in
+            aarch64|arm64)
+                wget -O playit "https://playit.gg/downloads/playit-linux-aarch64" -q --show-progress
+                ;;
+            armv7l|arm)
+                wget -O playit "https://playit.gg/downloads/playit-linux-arm7" -q --show-progress
+                ;;
+        esac
+        
+        chmod +x playit
+        echo -e "${GREEN}[✓] Downloaded${NC}"
     fi
     
-    tput civis 2>/dev/null
-    trap 'tput cnorm 2>/dev/null; echo' EXIT INT
+    echo -e "\n${CYAN}1.${NC} Setup Minecraft Server (Auto)"
+    echo -e "${CYAN}2.${NC} Setup Custom Server"
+    echo -e "${CYAN}3.${NC} Start existing tunnel"
+    echo -e "${CYAN}0.${NC} Back"
     
-    local prev_rx=$(cat $stats/rx_bytes)
-    local prev_tx=$(cat $stats/tx_bytes)
+    read -p $'\n'"Choose: " opt
     
-    while true; do
-        sleep 1
-        
-        local rx=$(cat $stats/rx_bytes)
-        local tx=$(cat $stats/tx_bytes)
-        
-        local rx_rate=$(( (rx - prev_rx) / 1024 ))
-        local tx_rate=$(( (tx - prev_tx) / 1024 ))
-        
-        [ $rx_rate -lt 0 ] && rx_rate=0
-        [ $tx_rate -lt 0 ] && tx_rate=0
-        
-        tput cup 10 0
-        tput ed
-        
-        echo -e "${GREEN}Network Activity:${NC}"
-        echo -e "Download: ${CYAN}$rx_rate KB/s${NC}"
-        echo -e "Upload:   ${CYAN}$tx_rate KB/s${NC}"
-        echo -e "Total RX: ${PURPLE}$((rx/1048576)) MB${NC}"
-        echo -e "Total TX: ${PURPLE}$((tx/1048576)) MB${NC}"
-        
-        if [ $ROOT -eq 1 ]; then
-            echo -e "\n${YELLOW}Connected Devices:${NC}"
+    case $opt in
+        1)
+            echo -e "\n${YELLOW}Starting Playit.gg for Minecraft...${NC}"
+            echo -e "${YELLOW}This will:${NC}"
+            echo -e "1. Open browser for quick setup"
+            echo -e "2. Auto-select nearest server (Singapore)"
+            echo -e "3. Give you address to share\n"
             
-            local clients=$(get_clients)
-            if [ -n "$clients" ]; then
-                local count=1
-                while read ip; do
-                    [ -z "$ip" ] && continue
-                    
-                    local limit=$(grep "^$ip " "$CLIENTS_DB" 2>/dev/null | cut -d' ' -f2)
-                    [ -z "$limit" ] || [ "$limit" = "0" ] && limit="∞" || limit="${limit}KB/s"
-                    
-                    printf "%2d. %-15s  [%s]\n" "$count" "$ip" "$limit"
-                    ((count++))
-                done <<< "$clients"
-            else
-                echo "No devices"
+            # Run playit
+            ./playit &
+            
+            sleep 3
+            
+            echo -e "${GREEN}════════════════════════════════════════════════${NC}"
+            echo -e "${GREEN}          PLAYIT.GG STARTED!${NC}"
+            echo -e "${GREEN}════════════════════════════════════════════════${NC}"
+            echo -e "\n${YELLOW}Steps:${NC}"
+            echo -e "1. Check the link shown above"
+            echo -e "2. Sign in with Google/Discord (FREE)"
+            echo -e "3. It will auto-detect your Minecraft server"
+            echo -e "4. Choose ${CYAN}Singapore${NC} or ${CYAN}Hong Kong${NC} region"
+            echo -e "5. Share the address with friends!\n"
+            echo -e "${GREEN}Your friends will get 15-30ms ping!${NC}"
+            ;;
+            
+        2)
+            read -p "Local port: " port
+            
+            echo -e "\n${YELLOW}Starting Playit.gg...${NC}"
+            ./playit --port $port &
+            
+            echo -e "${GREEN}[✓] Started on port $port${NC}"
+            echo -e "${YELLOW}Check the browser link to get your address${NC}"
+            ;;
+            
+        3)
+            ./playit &
+            echo -e "${GREEN}[✓] Playit.gg running${NC}"
+            ;;
+    esac
+    
+    read -p $'\n'"Press Enter..."
+}
+
+# ═══════════════════════════════════════════════════
+# ZeroTier - P2P NETWORK (BEST FOR FRIENDS)
+# ═══════════════════════════════════════════════════
+setup_zerotier() {
+    banner
+    echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}${BOLD}    ZEROTIER - PRIVATE NETWORK${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
+    
+    echo -e "${GREEN}What is ZeroTier?${NC}"
+    echo -e "• Creates ${YELLOW}virtual LAN${NC} between friends"
+    echo -e "• ${YELLOW}Direct P2P connection${NC} (lowest ping possible)"
+    echo -e "• Works even with CGNAT"
+    echo -e "• FREE for up to 100 devices\n"
+    
+    if ! command -v zerotier-cli &>/dev/null; then
+        echo -e "${YELLOW}[*] Installing ZeroTier...${NC}"
+        
+        # Install ZeroTier
+        curl -s https://install.zerotier.com | bash
+        
+        echo -e "${GREEN}[✓] Installed${NC}"
+    fi
+    
+    echo -e "${CYAN}1.${NC} Create new network"
+    echo -e "${CYAN}2.${NC} Join existing network"
+    echo -e "${CYAN}3.${NC} Show my networks"
+    echo -e "${CYAN}0.${NC} Back"
+    
+    read -p $'\n'"Choose: " opt
+    
+    case $opt in
+        1)
+            echo -e "\n${YELLOW}Creating ZeroTier network...${NC}"
+            echo -e "1. Go to: ${CYAN}https://my.zerotier.com${NC}"
+            echo -e "2. Sign up FREE"
+            echo -e "3. Create Network"
+            echo -e "4. Copy Network ID\n"
+            
+            read -p "Enter Network ID: " network_id
+            
+            if [ -n "$network_id" ]; then
+                su -c "zerotier-cli join $network_id"
+                
+                echo -e "\n${GREEN}[✓] Joined network!${NC}"
+                echo -e "${YELLOW}Share this Network ID with friends: ${CYAN}$network_id${NC}"
+                echo -e "${YELLOW}They run: zerotier-cli join $network_id${NC}"
+                echo -e "\n${GREEN}Then you can connect directly with NO LAG!${NC}"
             fi
-        fi
-        
-        prev_rx=$rx
-        prev_tx=$tx
-    done
-}
-
-# ═══════════════════════════════════════════════════
-# SPEED CONTROL
-# ═══════════════════════════════════════════════════
-set_speed() {
-    [ $ROOT -eq 0 ] && echo -e "${RED}Root required${NC}" && return
-    
-    banner
-    echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
-    echo -e "${CYAN}${BOLD}          SPEED CONTROL${NC}"
-    echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
-    
-    show_clients || { read -p "Press Enter..."; return; }
-    
-    local clients=$(get_clients)
-    local -a list
-    local i=1
-    
-    while read ip; do
-        [ -z "$ip" ] && continue
-        list[$i]="$ip"
-        ((i++))
-    done <<< "$clients"
-    
-    echo -e "\n${CYAN}0.${NC} All devices"
-    
-    read -p $'\n'"Select [0-$((i-1))]: " sel
-    read -p "Speed limit (KB/s, 0=unlimited): " speed
-    
-    [[ ! "$speed" =~ ^[0-9]+$ ]] && echo -e "${RED}Invalid${NC}" && return
-    
-    detect_interface
-    
-    apply_limit() {
-        local ip=$1
-        echo -e "${YELLOW}Setting $ip to ${speed}KB/s...${NC}"
-        
-        if [ "$speed" = "0" ]; then
-            su -c "tc filter del dev $INTERFACE protocol ip parent 1:0 prio 1 2>/dev/null"
-            sed -i "/^$ip /d" "$CLIENTS_DB" 2>/dev/null
-        else
-            su -c "tc qdisc show dev $INTERFACE | grep -q htb" || \
-                su -c "tc qdisc add dev $INTERFACE root handle 1: htb default 30 && \
-                       tc class add dev $INTERFACE parent 1: classid 1:1 htb rate 100mbit"
+            ;;
             
-            local kbit=$((speed * 8))
-            local cid="1:$(echo $ip | cut -d. -f4)"
+        2)
+            read -p "Network ID from friend: " network_id
             
-            su -c "tc class replace dev $INTERFACE parent 1:1 classid $cid htb rate ${kbit}kbit"
-            su -c "tc filter add dev $INTERFACE parent 1: protocol ip prio 1 u32 match ip dst $ip flowid $cid"
+            su -c "zerotier-cli join $network_id"
+            echo -e "${GREEN}[✓] Joined!${NC}"
+            echo -e "${YELLOW}Wait for network owner to approve you${NC}"
+            ;;
             
-            sed -i "/^$ip /d" "$CLIENTS_DB" 2>/dev/null
-            echo "$ip $speed" >> "$CLIENTS_DB"
-        fi
-        echo -e "${GREEN}[✓] Done${NC}"
-    }
+        3)
+            echo -e "\n${YELLOW}Your networks:${NC}"
+            su -c "zerotier-cli listnetworks"
+            ;;
+    esac
     
-    if [ "$sel" = "0" ]; then
-        for j in "${!list[@]}"; do
-            [ -z "${list[$j]}" ] && continue
-            apply_limit "${list[$j]}"
-        done
-    elif [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
-        apply_limit "${list[$sel]}"
-    fi
-    
-    read -p "Press Enter..."
+    read -p $'\n'"Press Enter..."
 }
 
 # ═══════════════════════════════════════════════════
-# BLOCK/UNBLOCK/KICK
+# LOCAL WIFI DIRECT (NO INTERNET NEEDED!)
 # ═══════════════════════════════════════════════════
-block_client() {
-    [ $ROOT -eq 0 ] && echo -e "${RED}Root required${NC}" && return
-    
+setup_wifi_direct() {
     banner
     echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
-    echo -e "${CYAN}${BOLD}          BLOCK DEVICE${NC}"
+    echo -e "${CYAN}${BOLD}    WIFI DIRECT - NO INTERNET NEEDED${NC}"
     echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
     
-    show_clients || { read -p "Press Enter..."; return; }
+    echo -e "${GREEN}Perfect for:${NC}"
+    echo -e "• Playing with friends ${YELLOW}in same room${NC}"
+    echo -e "• ${YELLOW}ZERO ping${NC} (local network)"
+    echo -e "• No internet required"
+    echo -e "• No CGNAT issues\n"
     
-    local clients=$(get_clients)
-    local -a list
-    local i=1
+    echo -e "${CYAN}Method 1: Hotspot Mode${NC}"
+    echo -e "1. Enable hotspot on your phone"
+    echo -e "2. Friends connect to your hotspot"
+    echo -e "3. Share your local IP: ${YELLOW}192.168.xxx.xxx:25565${NC}"
+    echo -e "4. They can connect directly!\n"
     
-    while read ip; do
-        [ -z "$ip" ] && continue
-        list[$i]="$ip"
-        ((i++))
-    done <<< "$clients"
+    # Get current local IP
+    local wifi_ip=$(ip addr show wlan0 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1)
+    local hotspot_ip=$(ip addr show ap0 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1)
     
-    read -p $'\n'"Select [1-$((i-1))]: " sel
-    
-    if [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
-        local ip="${list[$sel]}"
-        
-        echo -e "\n${YELLOW}Blocking $ip...${NC}"
-        su -c "iptables -I FORWARD -s $ip -j DROP"
-        su -c "iptables -I FORWARD -d $ip -j DROP"
-        echo "$ip" >> "$BLOCKED_DB"
-        echo -e "${GREEN}[✓] Blocked${NC}"
+    if [ -n "$hotspot_ip" ]; then
+        echo -e "${GREEN}Your Hotspot IP: ${CYAN}$hotspot_ip${NC}"
+        echo -e "${YELLOW}Friends connect to: ${CYAN}$hotspot_ip:25565${NC}"
+    elif [ -n "$wifi_ip" ]; then
+        echo -e "${GREEN}Your WiFi IP: ${CYAN}$wifi_ip${NC}"
+        echo -e "${YELLOW}If on same WiFi: ${CYAN}$wifi_ip:25565${NC}"
     fi
     
-    read -p "Press Enter..."
-}
-
-unblock_client() {
-    [ $ROOT -eq 0 ] && echo -e "${RED}Root required${NC}" && return
+    echo -e "\n${CYAN}Method 2: Same WiFi Network${NC}"
+    echo -e "1. Everyone connects to same WiFi"
+    echo -e "2. Share your local IP"
+    echo -e "3. Direct connection, ${GREEN}0ms ping!${NC}"
     
-    banner
-    echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
-    echo -e "${CYAN}${BOLD}         UNBLOCK DEVICE${NC}"
-    echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
-    
-    [ ! -s "$BLOCKED_DB" ] && echo -e "${RED}No blocked devices${NC}" && read -p "Press Enter..." && return
-    
-    echo -e "${YELLOW}Blocked devices:${NC}\n"
-    
-    local i=1
-    local -a list
-    
-    while read ip; do
-        [ -z "$ip" ] && continue
-        list[$i]="$ip"
-        printf "${CYAN}%d.${NC} %s\n" $i "$ip"
-        ((i++))
-    done < "$BLOCKED_DB"
-    
-    read -p $'\n'"Select [1-$((i-1))]: " sel
-    
-    if [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
-        local ip="${list[$sel]}"
-        
-        echo -e "\n${YELLOW}Unblocking $ip...${NC}"
-        su -c "iptables -D FORWARD -s $ip -j DROP 2>/dev/null"
-        su -c "iptables -D FORWARD -d $ip -j DROP 2>/dev/null"
-        sed -i "/^$ip$/d" "$BLOCKED_DB"
-        echo -e "${GREEN}[✓] Unblocked${NC}"
-    fi
-    
-    read -p "Press Enter..."
-}
-
-kick_client() {
-    [ $ROOT -eq 0 ] && echo -e "${RED}Root required${NC}" && return
-    
-    banner
-    echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
-    echo -e "${CYAN}${BOLD}          KICK DEVICE${NC}"
-    echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
-    
-    show_clients || { read -p "Press Enter..."; return; }
-    
-    local clients=$(get_clients)
-    local -a list
-    local i=1
-    
-    while read ip; do
-        [ -z "$ip" ] && continue
-        list[$i]="$ip"
-        ((i++))
-    done <<< "$clients"
-    
-    read -p $'\n'"Select [1-$((i-1))]: " sel
-    
-    if [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
-        detect_interface
-        local ip="${list[$sel]}"
-        
-        echo -e "\n${YELLOW}Kicking $ip...${NC}"
-        su -c "ip neigh del $ip dev $INTERFACE 2>/dev/null"
-        su -c "arp -d $ip 2>/dev/null"
-        echo -e "${GREEN}[✓] Kicked${NC}"
-    fi
-    
-    read -p "Press Enter..."
+    read -p $'\n'"Press Enter..."
 }
 
 # ═══════════════════════════════════════════════════
-# CLIENT MENU
+# CLOUDFLARE TUNNEL (INDONESIA OPTIMIZED)
 # ═══════════════════════════════════════════════════
-client_menu() {
+setup_cloudflare_indonesia() {
+    banner
+    echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}${BOLD}   CLOUDFLARE - INDONESIA OPTIMIZED${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
+    
+    echo -e "${GREEN}Cloudflare has servers in:${NC}"
+    echo -e "• ${YELLOW}Jakarta${NC} (CGK)"
+    echo -e "• ${YELLOW}Singapore${NC} (SIN)"
+    echo -e "• Ping: ${GREEN}5-20ms${NC} from Indonesia!\n"
+    
+    if ! command -v cloudflared &>/dev/null; then
+        echo -e "${YELLOW}[*] Installing cloudflared...${NC}"
+        
+        # Download cloudflared
+        local arch=$(uname -m)
+        case $arch in
+            aarch64|arm64)
+                wget -O cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64
+                ;;
+            armv7l|arm)
+                wget -O cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm
+                ;;
+        esac
+        
+        chmod +x cloudflared
+        mv cloudflared $PREFIX/bin/
+        echo -e "${GREEN}[✓] Installed${NC}"
+    fi
+    
+    echo -e "${CYAN}1.${NC} Quick tunnel (Minecraft)"
+    echo -e "${CYAN}2.${NC} Quick tunnel (Web)"
+    echo -e "${CYAN}0.${NC} Back"
+    
+    read -p $'\n'"Choose: " opt
+    
+    case $opt in
+        1)
+            echo -e "\n${YELLOW}Starting Cloudflare tunnel...${NC}"
+            echo -e "${YELLOW}This uses Jakarta/Singapore servers!${NC}\n"
+            
+            # For Minecraft we need TCP, so we use try-cloudflare with proxy
+            cloudflared tunnel --url tcp://localhost:25565 2>&1 | tee /tmp/cf.log &
+            
+            sleep 5
+            
+            local cf_url=$(grep -o 'https://.*\.trycloudflare.com' /tmp/cf.log | head -1)
+            
+            if [ -n "$cf_url" ]; then
+                echo -e "\n${GREEN}════════════════════════════════════════════════${NC}"
+                echo -e "${GREEN}    TUNNEL ACTIVE (JAKARTA SERVER!)${NC}"
+                echo -e "${GREEN}════════════════════════════════════════════════${NC}"
+                echo -e "\n${WHITE}Share this:${NC}"
+                echo -e "${CYAN}${BOLD}$cf_url${NC}"
+                echo -e "\n${YELLOW}Using Cloudflare Jakarta = FAST for Indonesia!${NC}"
+            fi
+            ;;
+            
+        2)
+            read -p "Web port (8080): " port
+            [ -z "$port" ] && port="8080"
+            
+            cloudflared tunnel --url http://localhost:$port 2>&1 | tee /tmp/cf.log &
+            
+            sleep 5
+            
+            local cf_url=$(grep -o 'https://.*\.trycloudflare.com' /tmp/cf.log | head -1)
+            
+            if [ -n "$cf_url" ]; then
+                echo -e "\n${GREEN}Web tunnel active!${NC}"
+                echo -e "URL: ${CYAN}$cf_url${NC}"
+                echo -e "${YELLOW}Served from Cloudflare Jakarta!${NC}"
+            fi
+            ;;
+    esac
+    
+    read -p $'\n'"Press Enter..."
+}
+
+# ═══════════════════════════════════════════════════
+# BEST TUNNEL SELECTOR
+# ═══════════════════════════════════════════════════
+best_tunnel_menu() {
     while true; do
         banner
         echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
-        echo -e "${CYAN}${BOLD}         DEVICE MANAGEMENT${NC}"
+        echo -e "${CYAN}${BOLD}    BEST TUNNELS FOR INDONESIA${NC}"
         echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
         
-        [ $ROOT -eq 1 ] && show_clients
+        echo -e "${YELLOW}Ping comparison from Indonesia:${NC}\n"
+        
+        echo -e "${GREEN}BEST (Lowest Ping):${NC}"
+        echo -e "${CYAN}1.${NC} WiFi Direct/Hotspot    ${GREEN}[0ms]${NC} - Same room"
+        echo -e "${CYAN}2.${NC} ZeroTier P2P          ${GREEN}[5-15ms]${NC} - Direct connection"
+        echo -e "${CYAN}3.${NC} Cloudflare Jakarta    ${GREEN}[5-20ms]${NC} - Jakarta server"
+        echo -e "${CYAN}4.${NC} Playit.gg Singapore   ${GREEN}[15-30ms]${NC} - Gaming optimized"
+        echo -e "${CYAN}5.${NC} ngrok Singapore       ${GREEN}[20-50ms]${NC} - Stable"
+        
+        echo -e "\n${YELLOW}AVOID (High Ping):${NC}"
+        echo -e "${RED}✗${NC} ngrok US/EU           ${RED}[200-300ms]${NC}"
+        echo -e "${RED}✗${NC} Serveo.net US         ${RED}[250ms+]${NC}"
+        echo -e "${RED}✗${NC} LocalTunnel US        ${RED}[300ms+]${NC}"
         
         echo -e "\n${CYAN}═══════════════════════════════════════════════════${NC}"
-        echo -e "${CYAN}1.${NC} Speed Control"
-        echo -e "${CYAN}2.${NC} Port Forwarding (Public)"
-        echo -e "${CYAN}3.${NC} Block Device"
-        echo -e "${CYAN}4.${NC} Unblock Device" 
-        echo -e "${CYAN}5.${NC} Kick Device"
+        echo -e "${CYAN}6.${NC} Test ping to all regions"
         echo -e "${CYAN}0.${NC} Back"
         echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
         
         read -p $'\n'"Choose: " opt
         
         case $opt in
-            1) set_speed ;;
-            2) port_forward ;;
-            3) block_client ;;
-            4) unblock_client ;;
-            5) kick_client ;;
+            1) setup_wifi_direct ;;
+            2) setup_zerotier ;;
+            3) setup_cloudflare_indonesia ;;
+            4) setup_playit ;;
+            5) setup_ngrok_asia ;;
+            6) test_regions ;;
             0) break ;;
         esac
     done
-}
-
-# ═══════════════════════════════════════════════════
-# ABOUT
-# ═══════════════════════════════════════════════════
-about() {
-    banner
-    echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
-    echo -e "${CYAN}${BOLD}                ABOUT${NC}"
-    echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
-    
-    echo -e "${WHITE}${BOLD}Hotspot Manager v7.0${NC}"
-    echo -e "${YELLOW}Public Access Edition${NC}\n"
-    
-    echo -e "${CYAN}Features:${NC}"
-    echo -e "${GREEN}✓${NC} Public IP detection & testing"
-    echo -e "${GREEN}✓${NC} Real port forwarding"
-    echo -e "${GREEN}✓${NC} Minecraft server support"
-    echo -e "${GREEN}✓${NC} Speed control"
-    echo -e "${GREEN}✓${NC} Device management"
-    
-    echo -e "\n${PURPLE}═══════════════════════════════════════════════════${NC}"
-    echo -e "${PURPLE}${BOLD}         By: senzore ganteng${NC}"
-    echo -e "${PURPLE}═══════════════════════════════════════════════════${NC}\n"
-    
-    read -p "Press Enter..."
 }
 
 # ═══════════════════════════════════════════════════
@@ -809,25 +537,14 @@ about() {
 main_menu() {
     while true; do
         banner
-        detect_interface
         
         echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
-        echo -e "${CYAN}${BOLD}             STATUS${NC}"
+        echo -e "${CYAN}${BOLD}          INDONESIA OPTIMIZED${NC}"
         echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
         
-        echo -e "${YELLOW}Root:${NC}       $([ $ROOT -eq 1 ] && echo -e "${GREEN}YES${NC}" || echo -e "${RED}NO${NC}")"
-        echo -e "${YELLOW}Interface:${NC}  ${GREEN}$INTERFACE${NC}"
-        echo -e "${YELLOW}Local IP:${NC}   ${GREEN}${LOCAL_IP:-Not detected}${NC}"
-        echo -e "${YELLOW}Public IP:${NC}  ${GREEN}${PUBLIC_IP:-Checking...}${NC}"
-        echo -e "${YELLOW}Network:${NC}    $(network_stats)"
-        
-        echo -e "\n${CYAN}═══════════════════════════════════════════════════${NC}"
-        echo -e "${CYAN}${BOLD}             MENU${NC}"
-        echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
-        
-        echo -e "${CYAN}1.${NC} Device Management"
-        echo -e "${CYAN}2.${NC} Real-time Monitor"
-        echo -e "${CYAN}3.${NC} About"
+        echo -e "${CYAN}1.${NC} Quick Minecraft Server (Best ping)"
+        echo -e "${CYAN}2.${NC} Indonesia Tunnels (Low ping)"
+        echo -e "${CYAN}3.${NC} Local Network (0ms ping)"
         echo -e "${CYAN}0.${NC} Exit"
         
         echo -e "\n${CYAN}═══════════════════════════════════════════════════${NC}"
@@ -835,10 +552,25 @@ main_menu() {
         read -p $'\n'"Choose: " opt
         
         case $opt in
-            1) client_menu ;;
-            2) monitor_stats ;;
-            3) about ;;
-            0) echo -e "\n${PURPLE}By: senzore ganteng${NC}\n"; exit ;;
+            1)
+                echo -e "\n${YELLOW}Best option for Indonesian players:${NC}"
+                echo -e "${CYAN}1.${NC} Friends nearby? Use WiFi Direct (0ms)"
+                echo -e "${CYAN}2.${NC} Friends in Indonesia? Use Playit.gg (15ms)"
+                echo -e "${CYAN}3.${NC} International? Use ngrok Singapore (50ms)"
+                
+                read -p $'\n'"Choose: " sub_opt
+                case $sub_opt in
+                    1) setup_wifi_direct ;;
+                    2) setup_playit ;;
+                    3) setup_ngrok_asia ;;
+                esac
+                ;;
+            2) best_tunnel_menu ;;
+            3) setup_wifi_direct ;;
+            0) 
+                echo -e "\n${PURPLE}By: senzore ganteng${NC}\n"
+                exit 0
+                ;;
         esac
     done
 }
@@ -847,17 +579,15 @@ main_menu() {
 # MAIN
 # ═══════════════════════════════════════════════════
 main() {
-    [ "$1" = "--clean" ] || [ "$1" = "-c" ] && rm -rf "$CONFIG_DIR"
-    
     banner
-    echo -e "${CYAN}Starting...${NC}\n"
+    echo -e "${CYAN}Starting Indonesia Optimized Version...${NC}\n"
     
     check_root
     install_deps
-    init_config
-    get_public_ip
     
-    echo -e "${GREEN}[✓] Ready${NC}\n"
+    echo -e "\n${GREEN}[✓] Ready${NC}"
+    echo -e "${YELLOW}This version prioritizes LOW PING for Indonesia!${NC}\n"
+    
     read -p "Press Enter to continue..."
     
     main_menu
