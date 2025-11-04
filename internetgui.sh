@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
 # ═══════════════════════════════════════════════════
-# TERMUX HOTSPOT MANAGER v6.0 - SIMPLIFIED
+# TERMUX HOTSPOT MANAGER v7.0 - PUBLIC ACCESS
 # By: senzore ganteng
 # ═══════════════════════════════════════════════════
 
@@ -25,7 +25,9 @@ PORTS_DB="$CONFIG_DIR/ports.db"
 # Global vars
 ROOT=0
 INTERFACE="wlan0"
-HOTSPOT_IP=""
+LOCAL_IP=""
+PUBLIC_IP=""
+PUBLIC_REACHABLE=0
 
 # ═══════════════════════════════════════════════════
 # BANNER
@@ -33,7 +35,7 @@ HOTSPOT_IP=""
 banner() {
     clear
     echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
-    echo -e "${WHITE}${BOLD}         HOTSPOT MANAGER v6.0${NC}"
+    echo -e "${WHITE}${BOLD}       HOTSPOT MANAGER v7.0 - PUBLIC${NC}"
     echo -e "${PURPLE}           By: senzore ganteng${NC}"
     echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
 }
@@ -56,7 +58,7 @@ check_root() {
 install_deps() {
     echo -e "${YELLOW}[*] Checking packages...${NC}"
     
-    for pkg in iproute2 net-tools bc iptables ncurses-utils; do
+    for pkg in iproute2 net-tools bc iptables ncurses-utils curl nmap-ncat; do
         if ! dpkg -s "$pkg" &>/dev/null; then
             echo -e "${YELLOW}Installing $pkg...${NC}"
             pkg install -y "$pkg" &>/dev/null
@@ -67,17 +69,57 @@ install_deps() {
 }
 
 # ═══════════════════════════════════════════════════
+# GET PUBLIC IP AND TEST
+# ═══════════════════════════════════════════════════
+get_public_ip() {
+    echo -e "${YELLOW}[*] Getting public IP...${NC}"
+    
+    # Try multiple services
+    PUBLIC_IP=$(curl -s --connect-timeout 3 ifconfig.me || \
+                curl -s --connect-timeout 3 icanhazip.com || \
+                curl -s --connect-timeout 3 ipinfo.io/ip || \
+                curl -s --connect-timeout 3 api.ipify.org || \
+                echo "")
+    
+    if [ -n "$PUBLIC_IP" ]; then
+        echo -e "${GREEN}[✓] Public IP: $PUBLIC_IP${NC}"
+        
+        # Test if public IP is reachable
+        echo -e "${YELLOW}[*] Testing public IP reachability...${NC}"
+        
+        # Try to ping ourselves (some IPs don't respond to ping)
+        if timeout 2 ping -c 1 "$PUBLIC_IP" &>/dev/null; then
+            PUBLIC_REACHABLE=1
+            echo -e "${GREEN}[✓] Public IP is REACHABLE (pingable)${NC}"
+        else
+            # Try TCP connection test on common port
+            if timeout 2 nc -zv "$PUBLIC_IP" 80 &>/dev/null || timeout 2 nc -zv "$PUBLIC_IP" 443 &>/dev/null; then
+                PUBLIC_REACHABLE=1
+                echo -e "${GREEN}[✓] Public IP is REACHABLE (TCP)${NC}"
+            else
+                PUBLIC_REACHABLE=0
+                echo -e "${YELLOW}[!] Public IP not pingable (might be behind CGNAT)${NC}"
+                echo -e "${YELLOW}[!] Port forwarding may only work on local network${NC}"
+            fi
+        fi
+    else
+        echo -e "${RED}[✗] Could not get public IP${NC}"
+        PUBLIC_IP="Unknown"
+    fi
+}
+
+# ═══════════════════════════════════════════════════
 # DETECT INTERFACE
 # ═══════════════════════════════════════════════════
 detect_interface() {
     [ $ROOT -eq 0 ] && return
     
     # Find hotspot interface
-    for iface in ap0 swlan0 wlan0 wlan1 rndis0; do
+    for iface in ap0 swlan0 wlan0 wlan1 rmnet_data0 rmnet_data1 rndis0; do
         local ip=$(su -c "ip addr show $iface 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | awk '{print \$2}' | cut -d/ -f1")
         if [ -n "$ip" ]; then
             INTERFACE="$iface"
-            HOTSPOT_IP="$ip"
+            LOCAL_IP="$ip"
             return
         fi
     done
@@ -143,6 +185,312 @@ network_stats() {
 }
 
 # ═══════════════════════════════════════════════════
+# PORT FORWARDING - PUBLIC ACCESS FIXED
+# ═══════════════════════════════════════════════════
+port_forward() {
+    [ $ROOT -eq 0 ] && echo -e "${RED}Root required${NC}" && return
+    
+    banner
+    echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}${BOLD}      PUBLIC PORT FORWARDING${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
+    
+    detect_interface
+    get_public_ip
+    
+    echo -e "\n${YELLOW}Network Information:${NC}"
+    echo -e "Local IP: ${GREEN}$LOCAL_IP${NC}"
+    echo -e "Public IP: ${GREEN}$PUBLIC_IP${NC}"
+    
+    if [ $PUBLIC_REACHABLE -eq 0 ]; then
+        echo -e "\n${YELLOW}⚠ WARNING: Public IP not reachable from outside${NC}"
+        echo -e "${YELLOW}Port forwarding will work on LOCAL NETWORK ONLY${NC}"
+        echo -e "${YELLOW}Share this IP with local devices: ${GREEN}$LOCAL_IP${NC}"
+    else
+        echo -e "\n${GREEN}✓ Public IP is reachable!${NC}"
+        echo -e "${GREEN}Share this IP with anyone: $PUBLIC_IP${NC}"
+    fi
+    
+    echo -e "\n${CYAN}1.${NC} Quick Minecraft Server (25565)"
+    echo -e "${CYAN}2.${NC} Custom Port Forward"
+    echo -e "${CYAN}3.${NC} List Active Forwards"
+    echo -e "${CYAN}4.${NC} Remove Port Forward"
+    echo -e "${CYAN}5.${NC} Test Port"
+    echo -e "${CYAN}0.${NC} Back"
+    
+    read -p $'\n'"Choose: " opt
+    
+    case $opt in
+        1)
+            # Minecraft quick setup
+            echo -e "\n${YELLOW}Setting up Minecraft Server Port...${NC}"
+            
+            # Find who has the server
+            local clients=$(get_clients)
+            echo -e "\n${YELLOW}Where is the Minecraft server running?${NC}"
+            echo -e "${CYAN}0.${NC} This device (Termux/localhost)"
+            
+            if [ -n "$clients" ]; then
+                local -a list
+                local i=1
+                
+                while read ip; do
+                    [ -z "$ip" ] && continue
+                    list[$i]="$ip"
+                    
+                    # Test if port 25565 is open on this device
+                    local status=""
+                    if timeout 1 nc -zv "$ip" 25565 &>/dev/null; then
+                        status="${GREEN}[DETECTED]${NC}"
+                    fi
+                    
+                    printf "${CYAN}%d.${NC} %s %s\n" $i "$ip" "$status"
+                    ((i++))
+                done <<< "$clients"
+                
+                read -p $'\n'"Select [0-$((i-1))]: " sel
+                
+                local mc_ip=""
+                if [ "$sel" = "0" ]; then
+                    mc_ip="127.0.0.1"
+                elif [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
+                    mc_ip="${list[$sel]}"
+                else
+                    return
+                fi
+            else
+                mc_ip="127.0.0.1"
+            fi
+            
+            echo -e "\n${YELLOW}Configuring port forwarding...${NC}"
+            
+            # Enable IP forwarding
+            su -c "echo 1 > /proc/sys/net/ipv4/ip_forward"
+            su -c "sysctl -w net.ipv4.ip_forward=1" &>/dev/null
+            
+            # Clear existing rules
+            su -c "iptables -t nat -D PREROUTING -p tcp --dport 25565 -j DNAT --to-destination $mc_ip:25565 2>/dev/null"
+            su -c "iptables -t nat -D PREROUTING -p udp --dport 25565 -j DNAT --to-destination $mc_ip:25565 2>/dev/null"
+            
+            # Add new rules
+            if [ "$mc_ip" = "127.0.0.1" ]; then
+                # For localhost
+                su -c "iptables -t nat -A PREROUTING -i $INTERFACE -p tcp --dport 25565 -j REDIRECT --to-port 25565"
+                su -c "iptables -t nat -A PREROUTING -i $INTERFACE -p udp --dport 25565 -j REDIRECT --to-port 25565"
+            else
+                # For other device
+                su -c "iptables -t nat -A PREROUTING -i $INTERFACE -p tcp --dport 25565 -j DNAT --to-destination $mc_ip:25565"
+                su -c "iptables -t nat -A PREROUTING -i $INTERFACE -p udp --dport 25565 -j DNAT --to-destination $mc_ip:25565"
+                su -c "iptables -A FORWARD -p tcp -d $mc_ip --dport 25565 -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT"
+                su -c "iptables -A FORWARD -p udp -d $mc_ip --dport 25565 -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT"
+            fi
+            
+            # Enable masquerading
+            su -c "iptables -t nat -C POSTROUTING -o $INTERFACE -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o $INTERFACE -j MASQUERADE"
+            
+            # Accept forwarding
+            su -c "iptables -P FORWARD ACCEPT"
+            
+            # For mobile data, also add rules for rmnet interfaces
+            for rmnet in rmnet_data0 rmnet_data1 rmnet_data2; do
+                if ip link show $rmnet &>/dev/null; then
+                    su -c "iptables -t nat -C POSTROUTING -o $rmnet -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o $rmnet -j MASQUERADE"
+                fi
+            done
+            
+            echo "$mc_ip 25565 both" >> "$PORTS_DB"
+            
+            echo -e "\n${GREEN}════════════════════════════════════════════════${NC}"
+            echo -e "${GREEN}     MINECRAFT SERVER CONFIGURED!${NC}"
+            echo -e "${GREEN}════════════════════════════════════════════════${NC}"
+            
+            if [ $PUBLIC_REACHABLE -eq 1 ]; then
+                echo -e "\n${WHITE}Share with friends:${NC}"
+                echo -e "${CYAN}${BOLD}$PUBLIC_IP:25565${NC}"
+                echo -e "\n${YELLOW}Testing if port is open...${NC}"
+                
+                # Test the port
+                if timeout 2 nc -zv "$LOCAL_IP" 25565 &>/dev/null; then
+                    echo -e "${GREEN}[✓] Port 25565 is OPEN locally${NC}"
+                else
+                    echo -e "${YELLOW}[!] Port 25565 not responding (is server running?)${NC}"
+                fi
+            else
+                echo -e "\n${WHITE}For LOCAL network friends:${NC}"
+                echo -e "${CYAN}${BOLD}$LOCAL_IP:25565${NC}"
+                echo -e "\n${YELLOW}Note: Only devices on same WiFi can connect${NC}"
+            fi
+            
+            echo -e "\n${YELLOW}Server hosted on: $mc_ip${NC}"
+            ;;
+            
+        2)
+            # Custom port
+            echo -e "\n${YELLOW}Custom Port Forward${NC}"
+            
+            read -p "Port number: " port
+            read -p "Protocol (tcp/udp/both) [tcp]: " proto
+            [ -z "$proto" ] && proto="tcp"
+            
+            local clients=$(get_clients)
+            echo -e "\n${YELLOW}Forward to:${NC}"
+            echo -e "${CYAN}0.${NC} This device (localhost)"
+            
+            if [ -n "$clients" ]; then
+                local -a list
+                local i=1
+                
+                while read ip; do
+                    [ -z "$ip" ] && continue
+                    list[$i]="$ip"
+                    printf "${CYAN}%d.${NC} %s\n" $i "$ip"
+                    ((i++))
+                done <<< "$clients"
+                
+                read -p $'\n'"Select [0-$((i-1))]: " sel
+                
+                local target_ip=""
+                if [ "$sel" = "0" ]; then
+                    target_ip="127.0.0.1"
+                elif [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
+                    target_ip="${list[$sel]}"
+                else
+                    return
+                fi
+            else
+                target_ip="127.0.0.1"
+            fi
+            
+            echo -e "\n${YELLOW}Setting up port forward...${NC}"
+            
+            su -c "echo 1 > /proc/sys/net/ipv4/ip_forward"
+            su -c "sysctl -w net.ipv4.ip_forward=1" &>/dev/null
+            
+            if [ "$target_ip" = "127.0.0.1" ]; then
+                if [ "$proto" = "both" ] || [ "$proto" = "tcp" ]; then
+                    su -c "iptables -t nat -A PREROUTING -i $INTERFACE -p tcp --dport $port -j REDIRECT --to-port $port"
+                fi
+                if [ "$proto" = "both" ] || [ "$proto" = "udp" ]; then
+                    su -c "iptables -t nat -A PREROUTING -i $INTERFACE -p udp --dport $port -j REDIRECT --to-port $port"
+                fi
+            else
+                if [ "$proto" = "both" ] || [ "$proto" = "tcp" ]; then
+                    su -c "iptables -t nat -A PREROUTING -i $INTERFACE -p tcp --dport $port -j DNAT --to-destination $target_ip:$port"
+                    su -c "iptables -A FORWARD -p tcp -d $target_ip --dport $port -j ACCEPT"
+                fi
+                if [ "$proto" = "both" ] || [ "$proto" = "udp" ]; then
+                    su -c "iptables -t nat -A PREROUTING -i $INTERFACE -p udp --dport $port -j DNAT --to-destination $target_ip:$port"
+                    su -c "iptables -A FORWARD -p udp -d $target_ip --dport $port -j ACCEPT"
+                fi
+            fi
+            
+            su -c "iptables -t nat -C POSTROUTING -o $INTERFACE -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o $INTERFACE -j MASQUERADE"
+            su -c "iptables -P FORWARD ACCEPT"
+            
+            echo "$target_ip $port $proto" >> "$PORTS_DB"
+            
+            echo -e "\n${GREEN}Port forwarding active!${NC}"
+            
+            if [ $PUBLIC_REACHABLE -eq 1 ]; then
+                echo -e "Public access: ${CYAN}$PUBLIC_IP:$port${NC}"
+            else
+                echo -e "Local access: ${CYAN}$LOCAL_IP:$port${NC}"
+            fi
+            ;;
+            
+        3)
+            # List forwards
+            echo -e "\n${YELLOW}Active Port Forwards:${NC}\n"
+            
+            if [ -s "$PORTS_DB" ]; then
+                while read line; do
+                    [ -z "$line" ] && continue
+                    local ip=$(echo $line | cut -d' ' -f1)
+                    local port=$(echo $line | cut -d' ' -f2)
+                    local proto=$(echo $line | cut -d' ' -f3)
+                    
+                    echo -e "${CYAN}Port $port ($proto)${NC} -> ${WHITE}$ip${NC}"
+                    
+                    if [ $PUBLIC_REACHABLE -eq 1 ]; then
+                        echo -e "  Public: ${GREEN}$PUBLIC_IP:$port${NC}"
+                    else
+                        echo -e "  Local: ${GREEN}$LOCAL_IP:$port${NC}"
+                    fi
+                done < "$PORTS_DB"
+            else
+                echo -e "${RED}No active forwards${NC}"
+            fi
+            ;;
+            
+        4)
+            # Remove forward
+            [ ! -s "$PORTS_DB" ] && echo -e "${RED}No active forwards${NC}" && read -p "Press Enter..." && return
+            
+            echo -e "\n${YELLOW}Active forwards:${NC}\n"
+            local i=1
+            local -a list
+            
+            while read line; do
+                [ -z "$line" ] && continue
+                list[$i]="$line"
+                local ip=$(echo $line | cut -d' ' -f1)
+                local port=$(echo $line | cut -d' ' -f2)
+                local proto=$(echo $line | cut -d' ' -f3)
+                
+                printf "${CYAN}%d.${NC} Port %s (%s) -> %s\n" $i "$port" "$proto" "$ip"
+                ((i++))
+            done < "$PORTS_DB"
+            
+            read -p $'\n'"Remove [1-$((i-1))]: " sel
+            
+            if [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
+                local rule="${list[$sel]}"
+                local ip=$(echo $rule | cut -d' ' -f1)
+                local port=$(echo $rule | cut -d' ' -f2)
+                local proto=$(echo $rule | cut -d' ' -f3)
+                
+                echo -e "\n${YELLOW}Removing forward...${NC}"
+                
+                if [ "$ip" = "127.0.0.1" ]; then
+                    su -c "iptables -t nat -D PREROUTING -i $INTERFACE -p tcp --dport $port -j REDIRECT --to-port $port 2>/dev/null"
+                    su -c "iptables -t nat -D PREROUTING -i $INTERFACE -p udp --dport $port -j REDIRECT --to-port $port 2>/dev/null"
+                else
+                    su -c "iptables -t nat -D PREROUTING -i $INTERFACE -p tcp --dport $port -j DNAT --to-destination $ip:$port 2>/dev/null"
+                    su -c "iptables -t nat -D PREROUTING -i $INTERFACE -p udp --dport $port -j DNAT --to-destination $ip:$port 2>/dev/null"
+                    su -c "iptables -D FORWARD -p tcp -d $ip --dport $port -j ACCEPT 2>/dev/null"
+                    su -c "iptables -D FORWARD -p udp -d $ip --dport $port -j ACCEPT 2>/dev/null"
+                fi
+                
+                sed -i "/^$ip $port $proto$/d" "$PORTS_DB"
+                echo -e "${GREEN}[✓] Removed${NC}"
+            fi
+            ;;
+            
+        5)
+            # Test port
+            echo -e "\n${YELLOW}Test Port${NC}"
+            read -p "Port number to test: " test_port
+            
+            echo -e "\n${YELLOW}Testing port $test_port...${NC}"
+            
+            # Test local
+            if timeout 1 nc -zv "$LOCAL_IP" "$test_port" &>/dev/null; then
+                echo -e "${GREEN}[✓] Port $test_port is OPEN on $LOCAL_IP${NC}"
+            else
+                echo -e "${RED}[✗] Port $test_port is CLOSED on $LOCAL_IP${NC}"
+            fi
+            
+            # Test from localhost
+            if timeout 1 nc -zv "127.0.0.1" "$test_port" &>/dev/null; then
+                echo -e "${GREEN}[✓] Port $test_port is OPEN on localhost${NC}"
+            fi
+            ;;
+    esac
+    
+    read -p $'\n'"Press Enter..."
+}
+
+# ═══════════════════════════════════════════════════
 # REALTIME MONITOR
 # ═══════════════════════════════════════════════════
 monitor_stats() {
@@ -153,7 +501,8 @@ monitor_stats() {
     
     detect_interface
     echo -e "${GREEN}Interface: $INTERFACE${NC}"
-    echo -e "${GREEN}Hotspot IP: $HOTSPOT_IP${NC}"
+    echo -e "${GREEN}Local IP: $LOCAL_IP${NC}"
+    echo -e "${GREEN}Public IP: $PUBLIC_IP${NC}"
     echo -e "${YELLOW}Press Ctrl+C to exit${NC}\n"
     
     local stats="/sys/class/net/$INTERFACE/statistics"
@@ -182,7 +531,7 @@ monitor_stats() {
         [ $rx_rate -lt 0 ] && rx_rate=0
         [ $tx_rate -lt 0 ] && tx_rate=0
         
-        tput cup 8 0
+        tput cup 10 0
         tput ed
         
         echo -e "${GREEN}Network Activity:${NC}"
@@ -217,283 +566,7 @@ monitor_stats() {
 }
 
 # ═══════════════════════════════════════════════════
-# PORT FORWARDING - FIXED VERSION
-# ═══════════════════════════════════════════════════
-port_forward() {
-    [ $ROOT -eq 0 ] && echo -e "${RED}Root required${NC}" && return
-    
-    banner
-    echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
-    echo -e "${CYAN}${BOLD}        PORT FORWARDING${NC}"
-    echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
-    
-    detect_interface
-    
-    echo -e "${YELLOW}Hotspot Network: $HOTSPOT_IP${NC}\n"
-    
-    echo -e "${CYAN}1.${NC} Add Port Forward"
-    echo -e "${CYAN}2.${NC} Remove Port Forward"
-    echo -e "${CYAN}3.${NC} List Active Forwards"
-    echo -e "${CYAN}4.${NC} Quick Minecraft (25565)"
-    echo -e "${CYAN}5.${NC} Quick Web Server (8080)"
-    echo -e "${CYAN}0.${NC} Back"
-    
-    read -p $'\n'"Choose: " opt
-    
-    case $opt in
-        1)
-            local clients=$(get_clients)
-            
-            # Option to forward to Termux itself
-            echo -e "\n${YELLOW}Forward to:${NC}"
-            echo -e "${CYAN}0.${NC} This device (Termux/localhost)"
-            
-            if [ -n "$clients" ]; then
-                local -a list
-                local i=1
-                
-                while read ip; do
-                    [ -z "$ip" ] && continue
-                    list[$i]="$ip"
-                    printf "${CYAN}%d.${NC} %s\n" $i "$ip"
-                    ((i++))
-                done <<< "$clients"
-                
-                read -p $'\n'"Select [0-$((i-1))]: " sel
-                
-                local target_ip=""
-                if [ "$sel" = "0" ]; then
-                    target_ip="127.0.0.1"
-                elif [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
-                    target_ip="${list[$sel]}"
-                else
-                    return
-                fi
-            else
-                echo -e "${YELLOW}No clients connected, forwarding to localhost${NC}"
-                target_ip="127.0.0.1"
-            fi
-            
-            read -p "Port number: " port
-            read -p "Protocol (tcp/udp/both) [tcp]: " proto
-            [ -z "$proto" ] && proto="tcp"
-            
-            echo -e "\n${YELLOW}Setting up port forward...${NC}"
-            
-            # Enable forwarding
-            su -c "echo 1 > /proc/sys/net/ipv4/ip_forward"
-            
-            # Clear any existing rules for this port
-            su -c "iptables -t nat -D PREROUTING -p tcp --dport $port -j DNAT --to-destination $target_ip:$port 2>/dev/null"
-            su -c "iptables -t nat -D PREROUTING -p udp --dport $port -j DNAT --to-destination $target_ip:$port 2>/dev/null"
-            
-            if [ "$target_ip" = "127.0.0.1" ]; then
-                # Forward to localhost (Termux)
-                if [ "$proto" = "both" ] || [ "$proto" = "tcp" ]; then
-                    su -c "iptables -t nat -A PREROUTING -p tcp --dport $port -j REDIRECT --to-port $port"
-                fi
-                if [ "$proto" = "both" ] || [ "$proto" = "udp" ]; then
-                    su -c "iptables -t nat -A PREROUTING -p udp --dport $port -j REDIRECT --to-port $port"
-                fi
-            else
-                # Forward to other device
-                if [ "$proto" = "both" ] || [ "$proto" = "tcp" ]; then
-                    su -c "iptables -t nat -A PREROUTING -p tcp --dport $port -j DNAT --to-destination $target_ip:$port"
-                    su -c "iptables -A FORWARD -p tcp -d $target_ip --dport $port -j ACCEPT"
-                fi
-                if [ "$proto" = "both" ] || [ "$proto" = "udp" ]; then
-                    su -c "iptables -t nat -A PREROUTING -p udp --dport $port -j DNAT --to-destination $target_ip:$port"
-                    su -c "iptables -A FORWARD -p udp -d $target_ip --dport $port -j ACCEPT"
-                fi
-            fi
-            
-            # Ensure MASQUERADE
-            su -c "iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -j MASQUERADE"
-            
-            # Accept forwarding
-            su -c "iptables -P FORWARD ACCEPT 2>/dev/null"
-            
-            echo "$target_ip $port $proto" >> "$PORTS_DB"
-            
-            echo -e "\n${GREEN}Port forwarding active!${NC}"
-            echo -e "${GREEN}Connect to: ${CYAN}$HOTSPOT_IP:$port${NC}"
-            echo -e "${GREEN}Forwarding to: ${CYAN}$target_ip:$port ($proto)${NC}"
-            ;;
-            
-        2)
-            [ ! -s "$PORTS_DB" ] && echo -e "${RED}No active forwards${NC}" && read -p "Press Enter..." && return
-            
-            echo -e "\n${YELLOW}Active forwards:${NC}\n"
-            local i=1
-            local -a list
-            
-            while read line; do
-                [ -z "$line" ] && continue
-                list[$i]="$line"
-                local ip=$(echo $line | cut -d' ' -f1)
-                local port=$(echo $line | cut -d' ' -f2)
-                local proto=$(echo $line | cut -d' ' -f3)
-                
-                printf "${CYAN}%d.${NC} Port %s (%s) -> %s\n" $i "$port" "$proto" "$ip"
-                ((i++))
-            done < "$PORTS_DB"
-            
-            read -p $'\n'"Remove [1-$((i-1))]: " sel
-            
-            if [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
-                local rule="${list[$sel]}"
-                local ip=$(echo $rule | cut -d' ' -f1)
-                local port=$(echo $rule | cut -d' ' -f2)
-                local proto=$(echo $rule | cut -d' ' -f3)
-                
-                echo -e "\n${YELLOW}Removing forward...${NC}"
-                
-                if [ "$ip" = "127.0.0.1" ]; then
-                    su -c "iptables -t nat -D PREROUTING -p tcp --dport $port -j REDIRECT --to-port $port 2>/dev/null"
-                    su -c "iptables -t nat -D PREROUTING -p udp --dport $port -j REDIRECT --to-port $port 2>/dev/null"
-                else
-                    su -c "iptables -t nat -D PREROUTING -p tcp --dport $port -j DNAT --to-destination $ip:$port 2>/dev/null"
-                    su -c "iptables -t nat -D PREROUTING -p udp --dport $port -j DNAT --to-destination $ip:$port 2>/dev/null"
-                    su -c "iptables -D FORWARD -p tcp -d $ip --dport $port -j ACCEPT 2>/dev/null"
-                    su -c "iptables -D FORWARD -p udp -d $ip --dport $port -j ACCEPT 2>/dev/null"
-                fi
-                
-                sed -i "/^$ip $port $proto$/d" "$PORTS_DB"
-                echo -e "${GREEN}[✓] Removed${NC}"
-            fi
-            ;;
-            
-        3)
-            echo -e "\n${YELLOW}Active Port Forwards:${NC}\n"
-            
-            if [ -s "$PORTS_DB" ]; then
-                while read line; do
-                    [ -z "$line" ] && continue
-                    local ip=$(echo $line | cut -d' ' -f1)
-                    local port=$(echo $line | cut -d' ' -f2)
-                    local proto=$(echo $line | cut -d' ' -f3)
-                    
-                    echo -e "${CYAN}Port $port ($proto)${NC} -> ${WHITE}$ip${NC}"
-                    echo -e "  Connect: ${GREEN}$HOTSPOT_IP:$port${NC}"
-                done < "$PORTS_DB"
-            else
-                echo -e "${RED}No active forwards${NC}"
-            fi
-            ;;
-            
-        4)
-            # Minecraft quick setup
-            echo -e "\n${YELLOW}Minecraft Server Setup${NC}"
-            
-            local clients=$(get_clients)
-            echo -e "\n${CYAN}0.${NC} Host on Termux"
-            
-            if [ -n "$clients" ]; then
-                local -a list
-                local i=1
-                
-                while read ip; do
-                    [ -z "$ip" ] && continue
-                    list[$i]="$ip"
-                    printf "${CYAN}%d.${NC} %s\n" $i "$ip"
-                    ((i++))
-                done <<< "$clients"
-                
-                read -p $'\n'"Select host [0-$((i-1))]: " sel
-                
-                local mc_ip=""
-                if [ "$sel" = "0" ]; then
-                    mc_ip="127.0.0.1"
-                elif [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
-                    mc_ip="${list[$sel]}"
-                else
-                    return
-                fi
-            else
-                mc_ip="127.0.0.1"
-            fi
-            
-            echo -e "\n${YELLOW}Setting up Minecraft...${NC}"
-            
-            su -c "echo 1 > /proc/sys/net/ipv4/ip_forward"
-            
-            if [ "$mc_ip" = "127.0.0.1" ]; then
-                su -c "iptables -t nat -A PREROUTING -p tcp --dport 25565 -j REDIRECT --to-port 25565"
-                su -c "iptables -t nat -A PREROUTING -p udp --dport 25565 -j REDIRECT --to-port 25565"
-            else
-                su -c "iptables -t nat -A PREROUTING -p tcp --dport 25565 -j DNAT --to-destination $mc_ip:25565"
-                su -c "iptables -t nat -A PREROUTING -p udp --dport 25565 -j DNAT --to-destination $mc_ip:25565"
-                su -c "iptables -A FORWARD -p tcp -d $mc_ip --dport 25565 -j ACCEPT"
-                su -c "iptables -A FORWARD -p udp -d $mc_ip --dport 25565 -j ACCEPT"
-            fi
-            
-            su -c "iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -j MASQUERADE"
-            su -c "iptables -P FORWARD ACCEPT 2>/dev/null"
-            
-            echo "$mc_ip 25565 both" >> "$PORTS_DB"
-            
-            echo -e "\n${GREEN}Minecraft server ready!${NC}"
-            echo -e "${GREEN}Server IP: ${CYAN}$HOTSPOT_IP:25565${NC}"
-            ;;
-            
-        5)
-            # Web server quick setup
-            echo -e "\n${YELLOW}Web Server Setup${NC}"
-            
-            local clients=$(get_clients)
-            echo -e "\n${CYAN}0.${NC} Host on Termux"
-            
-            if [ -n "$clients" ]; then
-                local -a list
-                local i=1
-                
-                while read ip; do
-                    [ -z "$ip" ] && continue
-                    list[$i]="$ip"
-                    printf "${CYAN}%d.${NC} %s\n" $i "$ip"
-                    ((i++))
-                done <<< "$clients"
-                
-                read -p $'\n'"Select host [0-$((i-1))]: " sel
-                
-                local web_ip=""
-                if [ "$sel" = "0" ]; then
-                    web_ip="127.0.0.1"
-                elif [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
-                    web_ip="${list[$sel]}"
-                else
-                    return
-                fi
-            else
-                web_ip="127.0.0.1"
-            fi
-            
-            echo -e "\n${YELLOW}Setting up web server...${NC}"
-            
-            su -c "echo 1 > /proc/sys/net/ipv4/ip_forward"
-            
-            if [ "$web_ip" = "127.0.0.1" ]; then
-                su -c "iptables -t nat -A PREROUTING -p tcp --dport 8080 -j REDIRECT --to-port 8080"
-            else
-                su -c "iptables -t nat -A PREROUTING -p tcp --dport 8080 -j DNAT --to-destination $web_ip:8080"
-                su -c "iptables -A FORWARD -p tcp -d $web_ip --dport 8080 -j ACCEPT"
-            fi
-            
-            su -c "iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -j MASQUERADE"
-            su -c "iptables -P FORWARD ACCEPT 2>/dev/null"
-            
-            echo "$web_ip 8080 tcp" >> "$PORTS_DB"
-            
-            echo -e "\n${GREEN}Web server ready!${NC}"
-            echo -e "${GREEN}URL: ${CYAN}http://$HOTSPOT_IP:8080${NC}"
-            ;;
-    esac
-    
-    read -p $'\n'"Press Enter..."
-}
-
-# ═══════════════════════════════════════════════════
-# SPEED CONTROL - SIMPLE TEXT
+# SPEED CONTROL
 # ═══════════════════════════════════════════════════
 set_speed() {
     [ $ROOT -eq 0 ] && echo -e "${RED}Root required${NC}" && return
@@ -684,7 +757,7 @@ client_menu() {
         
         echo -e "\n${CYAN}═══════════════════════════════════════════════════${NC}"
         echo -e "${CYAN}1.${NC} Speed Control"
-        echo -e "${CYAN}2.${NC} Port Forwarding"
+        echo -e "${CYAN}2.${NC} Port Forwarding (Public)"
         echo -e "${CYAN}3.${NC} Block Device"
         echo -e "${CYAN}4.${NC} Unblock Device" 
         echo -e "${CYAN}5.${NC} Kick Device"
@@ -713,12 +786,13 @@ about() {
     echo -e "${CYAN}${BOLD}                ABOUT${NC}"
     echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
     
-    echo -e "${WHITE}${BOLD}Hotspot Manager v6.0${NC}"
-    echo -e "${YELLOW}Simplified & Fixed Edition${NC}\n"
+    echo -e "${WHITE}${BOLD}Hotspot Manager v7.0${NC}"
+    echo -e "${YELLOW}Public Access Edition${NC}\n"
     
     echo -e "${CYAN}Features:${NC}"
-    echo -e "${GREEN}✓${NC} Simple text interface"
-    echo -e "${GREEN}✓${NC} Working port forwarding"
+    echo -e "${GREEN}✓${NC} Public IP detection & testing"
+    echo -e "${GREEN}✓${NC} Real port forwarding"
+    echo -e "${GREEN}✓${NC} Minecraft server support"
     echo -e "${GREEN}✓${NC} Speed control"
     echo -e "${GREEN}✓${NC} Device management"
     
@@ -743,7 +817,8 @@ main_menu() {
         
         echo -e "${YELLOW}Root:${NC}       $([ $ROOT -eq 1 ] && echo -e "${GREEN}YES${NC}" || echo -e "${RED}NO${NC}")"
         echo -e "${YELLOW}Interface:${NC}  ${GREEN}$INTERFACE${NC}"
-        echo -e "${YELLOW}Hotspot IP:${NC} ${GREEN}${HOTSPOT_IP:-Not detected}${NC}"
+        echo -e "${YELLOW}Local IP:${NC}   ${GREEN}${LOCAL_IP:-Not detected}${NC}"
+        echo -e "${YELLOW}Public IP:${NC}  ${GREEN}${PUBLIC_IP:-Checking...}${NC}"
         echo -e "${YELLOW}Network:${NC}    $(network_stats)"
         
         echo -e "\n${CYAN}═══════════════════════════════════════════════════${NC}"
@@ -780,6 +855,7 @@ main() {
     check_root
     install_deps
     init_config
+    get_public_ip
     
     echo -e "${GREEN}[✓] Ready${NC}\n"
     read -p "Press Enter to continue..."
