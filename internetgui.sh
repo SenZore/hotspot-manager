@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
 # ═══════════════════════════════════════════════════
-# TERMUX HOTSPOT MANAGER v2.1
+# TERMUX HOTSPOT MANAGER v2.1 - Realme C15 Edition
 # Dibuat oleh Senzore, Alias Adam Sanjaya <3
 # ═══════════════════════════════════════════════════
 
@@ -35,7 +35,7 @@ TETHERING_ACTIVE=0
 show_banner() {
     clear
     echo -e "${CYAN}════════════════════════════════════════════════${NC}"
-    echo -e "${CYAN}${BOLD}        HOTSPOT MANAGER - TERMUX v2.1${NC}"
+    echo -e "${CYAN}${BOLD}     HOTSPOT MANAGER - TERMUX v2.1 (Realme)${NC}"
     echo -e "${PURPLE}      Dibuat oleh Senzore, Alias Adam Sanjaya <3${NC}"
     echo -e "${CYAN}════════════════════════════════════════════════${NC}\n"
 }
@@ -75,7 +75,7 @@ check_root() {
 }
 
 # ═══════════════════════════════════════════════════
-# INSTALL DEPENDENCIES (Non-blocking)
+# INSTALL DEPENDENCIES
 # ═══════════════════════════════════════════════════
 install_dependencies() {
     echo -e "${YELLOW}[*] Checking dependencies...${NC}\n"
@@ -104,7 +104,7 @@ install_dependencies() {
 }
 
 # ═══════════════════════════════════════════════════
-# DETECT HOTSPOT INTERFACE (Passive Detection)
+# DETECT HOTSPOT INTERFACE (Realme C15)
 # ═══════════════════════════════════════════════════
 detect_hotspot_interface() {
     if [ $ROOT_AVAILABLE -eq 0 ]; then
@@ -112,10 +112,13 @@ detect_hotspot_interface() {
         return
     fi
     
-    local interfaces=$(su -c "ip link show" 2>/dev/null | grep -E "wlan0|ap0|swlan0|softap0" | awk -F: '{print $2}' | tr -d ' ')
+    # Get all network interfaces
+    local interfaces=$(su -c "ip link show" 2>/dev/null | grep -E "^[0-9]+" | awk -F: '{print $2}' | tr -d ' ')
     
-    for iface in ap0 swlan0 softap0 wlan0; do
+    # Realme C15 priority order
+    for iface in ap0 swlan0 wlan0 softap0 rndis0; do
         if echo "$interfaces" | grep -q "^$iface$"; then
+            # Check if interface is UP
             if su -c "ip link show $iface" 2>/dev/null | grep -q "state UP"; then
                 HOTSPOT_INTERFACE="$iface"
                 TETHERING_ACTIVE=1
@@ -124,6 +127,7 @@ detect_hotspot_interface() {
         fi
     done
     
+    # Default fallback
     HOTSPOT_INTERFACE="wlan0"
 }
 
@@ -165,6 +169,48 @@ EOF
 }
 
 # ═══════════════════════════════════════════════════
+# GET CLIENT HOSTNAME
+# ═══════════════════════════════════════════════════
+get_client_hostname() {
+    local ip=$1
+    
+    if [ $ROOT_AVAILABLE -eq 0 ]; then
+        echo "Unknown"
+        return
+    fi
+    
+    # Try multiple DHCP lease locations for Realme/ColorOS
+    local hostname=""
+    
+    # Method 1: dnsmasq leases
+    hostname=$(su -c "cat /data/misc/dhcp/dnsmasq.leases 2>/dev/null" | grep "$ip" | awk '{print $4}')
+    
+    # Method 2: hostapd leases
+    if [ -z "$hostname" ] || [ "$hostname" == "*" ]; then
+        hostname=$(su -c "cat /data/vendor/wifi/hostapd/hostapd.leases 2>/dev/null" | grep "$ip" | awk '{print $4}')
+    fi
+    
+    # Method 3: Alternative dhcp location
+    if [ -z "$hostname" ] || [ "$hostname" == "*" ]; then
+        hostname=$(su -c "cat /data/misc/wifi/hostapd.leases 2>/dev/null" | grep "$ip" | awk '{print $4}')
+    fi
+    
+    # Method 4: Check /proc/net/arp
+    if [ -z "$hostname" ] || [ "$hostname" == "*" ]; then
+        hostname=$(su -c "cat /proc/net/arp" 2>/dev/null | grep "$ip" | awk '{print $6}')
+    fi
+    
+    # Clean up
+    hostname=$(echo "$hostname" | tr -d '\n\r' | sed 's/[^a-zA-Z0-9._-]//g')
+    
+    if [ -z "$hostname" ] || [ "$hostname" == "*" ] || [ "$hostname" == "00:00:00:00:00:00" ]; then
+        echo "Unknown"
+    else
+        echo "$hostname"
+    fi
+}
+
+# ═══════════════════════════════════════════════════
 # GET HOTSPOT STATUS
 # ═══════════════════════════════════════════════════
 get_hotspot_status() {
@@ -183,41 +229,7 @@ get_hotspot_status() {
 }
 
 # ═══════════════════════════════════════════════════
-# GET CLIENT HOSTNAME
-# ═══════════════════════════════════════════════════
-get_client_hostname() {
-    local ip=$1
-    
-    if [ $ROOT_AVAILABLE -eq 0 ]; then
-        echo "Unknown"
-        return
-    fi
-    
-    # Try DHCP leases first (most reliable)
-    local hostname=$(su -c "cat /data/misc/dhcp/dnsmasq.leases 2>/dev/null" | grep "$ip" | awk '{print $4}')
-    
-    # Try alternative DHCP location
-    if [ -z "$hostname" ] || [ "$hostname" == "*" ]; then
-        hostname=$(su -c "cat /data/vendor/wifi/hostapd/hostapd.leases 2>/dev/null" | grep "$ip" | awk '{print $4}')
-    fi
-    
-    # Try ARP cache hostname
-    if [ -z "$hostname" ] || [ "$hostname" == "*" ]; then
-        hostname=$(su -c "cat /proc/net/arp" 2>/dev/null | grep "$ip" | awk '{print $6}')
-    fi
-    
-    # Clean up and validate
-    hostname=$(echo "$hostname" | tr -d '\n\r' | sed 's/[^a-zA-Z0-9._-]//g')
-    
-    if [ -z "$hostname" ] || [ "$hostname" == "*" ] || [ "$hostname" == "00:00:00:00:00:00" ]; then
-        echo "Unknown Device"
-    else
-        echo "$hostname"
-    fi
-}
-
-# ═══════════════════════════════════════════════════
-# GET CONNECTED CLIENTS (IPv4 only with hostnames)
+# GET CONNECTED CLIENTS (FIXED - IPv4 only)
 # ═══════════════════════════════════════════════════
 get_connected_clients() {
     if [ $ROOT_AVAILABLE -eq 0 ]; then
@@ -226,29 +238,36 @@ get_connected_clients() {
     fi
     
     detect_hotspot_interface
+    local iface=$HOTSPOT_INTERFACE
     
-    # Get clients and filter IPv4 only
-    su -c "ip neigh show dev $HOTSPOT_INTERFACE" 2>/dev/null | \
-        grep -E "REACHABLE|STALE|DELAY" | \
-        grep -v "00:00:00:00:00:00" | \
-        grep -v ":" | \
-        awk '{print $1" "$5}' | \
-        while read ip mac; do
-            # Filter out IPv6 (contains multiple colons in MAC or IP)
-            if [[ ! "$ip" =~ .*:.* ]]; then
+    # Method 1: ip neigh (preferred)
+    local clients=$(su -c "ip neigh show dev $iface" 2>/dev/null | grep -E "REACHABLE|STALE|DELAY|PERMANENT" | grep -v "00:00:00:00:00:00")
+    
+    # Method 2: /proc/net/arp (fallback)
+    if [ -z "$clients" ]; then
+        clients=$(su -c "cat /proc/net/arp" 2>/dev/null | grep -v "00:00:00:00:00:00" | grep -v "IP address" | grep "$iface")
+    fi
+    
+    # Filter and format output
+    echo "$clients" | while read line; do
+        local ip=$(echo "$line" | awk '{print $1}')
+        local mac=$(echo "$line" | awk '{print $5}')
+        
+        # If MAC is in different position (arp format)
+        if [ -z "$mac" ] || [ "$mac" == "00:00:00:00:00:00" ]; then
+            mac=$(echo "$line" | awk '{print $4}')
+        fi
+        
+        # Filter out IPv6 addresses (contain multiple colons in IP part)
+        # IPv4 format: xxx.xxx.xxx.xxx
+        # IPv6 format: xxxx:xxxx:xxxx...
+        if echo "$ip" | grep -qE "^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$"; then
+            # Valid IPv4
+            if [ -n "$mac" ] && [ "$mac" != "00:00:00:00:00:00" ]; then
                 echo "$ip $mac"
             fi
-        done
-    
-    # Alternative ARP check for IPv4 only
-    if [ -z "$(su -c "ip neigh show dev $HOTSPOT_INTERFACE" 2>/dev/null)" ]; then
-        su -c "cat /proc/net/arp" 2>/dev/null | \
-            grep -v "00:00:00:00:00:00" | \
-            grep -v "IP address" | \
-            grep "$HOTSPOT_INTERFACE" | \
-            awk '{print $1" "$4}' | \
-            grep -v ":" # Filter IPv6
-    fi
+        fi
+    done | sort -u
 }
 
 # ═══════════════════════════════════════════════════
@@ -269,6 +288,43 @@ get_network_stats() {
     else
         echo "No data"
     fi
+}
+
+# ═══════════════════════════════════════════════════
+# DEBUG: SHOW ALL INTERFACES AND ARP
+# ═══════════════════════════════════════════════════
+debug_network() {
+    show_banner
+    echo -e "${CYAN}════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}${BOLD}           NETWORK DEBUG INFO${NC}"
+    echo -e "${CYAN}════════════════════════════════════════════════${NC}\n"
+    
+    if [ $ROOT_AVAILABLE -eq 0 ]; then
+        echo -e "${RED}[✗] Root required${NC}"
+        read -p "Press Enter..."
+        return
+    fi
+    
+    echo -e "${YELLOW}Available Interfaces:${NC}\n"
+    su -c "ip link show" 2>/dev/null | grep -E "^[0-9]+" | while read line; do
+        local iface=$(echo "$line" | awk -F: '{print $2}' | tr -d ' ')
+        local status=$(echo "$line" | grep -o "state [A-Z]*" | awk '{print $2}')
+        printf "${CYAN}•${NC} ${WHITE}%-15s${NC} ${YELLOW}%s${NC}\n" "$iface" "$status"
+    done
+    
+    echo -e "\n${YELLOW}Detected Hotspot Interface:${NC} ${GREEN}$HOTSPOT_INTERFACE${NC}"
+    
+    echo -e "\n${YELLOW}ARP Table (all):${NC}\n"
+    su -c "cat /proc/net/arp" 2>/dev/null | head -20
+    
+    echo -e "\n${YELLOW}IP Neighbors (hotspot interface):${NC}\n"
+    su -c "ip neigh show dev $HOTSPOT_INTERFACE" 2>/dev/null
+    
+    echo -e "\n${YELLOW}DHCP Leases:${NC}\n"
+    su -c "cat /data/misc/dhcp/dnsmasq.leases 2>/dev/null || echo 'Not found'"
+    
+    echo ""
+    read -p "Press Enter..."
 }
 
 # ═══════════════════════════════════════════════════
@@ -338,7 +394,7 @@ realtime_stats() {
 }
 
 # ═══════════════════════════════════════════════════
-# APPLY SPEED LIMIT (Suppressed errors)
+# APPLY SPEED LIMIT
 # ═══════════════════════════════════════════════════
 apply_speed_limit() {
     local ip=$1
@@ -401,6 +457,7 @@ set_client_speed_limit() {
     
     if [ -z "$clients" ]; then
         echo -e "${RED}[✗] No clients connected${NC}"
+        echo -e "${YELLOW}[!] Make sure hotspot is enabled and clients are connected${NC}"
         read -p "Press Enter..."
         return
     fi
@@ -673,6 +730,7 @@ client_management() {
         echo -e "${CYAN}2.${NC} Block Client"
         echo -e "${CYAN}3.${NC} Unblock Client"
         echo -e "${CYAN}4.${NC} Kick Client"
+        echo -e "${CYAN}5.${NC} Debug Network Info"
         echo -e "${CYAN}0.${NC} Back"
         echo -e "${CYAN}════════════════════════════════════════════════${NC}"
         
@@ -683,6 +741,7 @@ client_management() {
             2) block_client ;;
             3) unblock_client ;;
             4) kick_client ;;
+            5) debug_network ;;
             0) break ;;
         esac
     done
@@ -743,24 +802,27 @@ show_about() {
     echo -e "${CYAN}${BOLD}                 ABOUT${NC}"
     echo -e "${CYAN}════════════════════════════════════════════════${NC}\n"
     
-    echo -e "${WHITE}${BOLD}Hotspot Manager v2.1${NC}"
-    echo -e "${YELLOW}Advanced Tethering Management for Android${NC}\n"
+    echo -e "${WHITE}${BOLD}Hotspot Manager v2.1 - Realme Edition${NC}"
+    echo -e "${YELLOW}Advanced Tethering Management for Realme C15${NC}\n"
     
     echo -e "${CYAN}Features:${NC}"
-    echo -e "${GREEN}✓${NC} Passive hotspot detection (Realme C15)"
+    echo -e "${GREEN}✓${NC} Passive hotspot detection"
     echo -e "${GREEN}✓${NC} IPv4 client detection with hostnames"
-    echo -e "${GREEN}✓${NC} Real-time statistics"
-    echo -e "${GREEN}✓${NC} Per-client speed limiting"
+    echo -e "${GREEN}✓${NC} Real-time bandwidth monitoring"
+    echo -e "${GREEN}✓${NC} Per-client speed limiting (tc)"
     echo -e "${GREEN}✓${NC} Client blocking/kicking"
     echo -e "${GREEN}✓${NC} Root & Magisk support"
+    echo -e "${GREEN}✓${NC} Network debugging tools"
     
     echo ""
     echo -e "${PURPLE}════════════════════════════════════════════════${NC}"
     echo -e "${PURPLE}${BOLD}      Dibuat oleh Senzore, Alias Adam Sanjaya <3${NC}"
     echo -e "${PURPLE}════════════════════════════════════════════════${NC}\n"
     
-    echo -e "${YELLOW}Note: Root access required for full features${NC}"
-    echo -e "${YELLOW}      Enable hotspot manually from Settings${NC}\n"
+    echo -e "${YELLOW}Note:${NC}"
+    echo -e "  • Root access required for all features"
+    echo -e "  • Enable hotspot from Android Settings"
+    echo -e "  • Use 'Debug Network Info' if no clients shown\n"
     
     read -p "Press Enter..."
 }
