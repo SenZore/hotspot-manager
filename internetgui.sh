@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
 # ═══════════════════════════════════════════════════
-# TERMUX HOTSPOT MANAGER v2.2
+# TERMUX HOTSPOT MANAGER v2.3
 # By: senzore ganteng
 # ═══════════════════════════════════════════════════
 
@@ -47,7 +47,7 @@ check_clean_install() {
 show_banner() {
     clear
     echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
-    echo -e "${WHITE}${BOLD}         HOTSPOT MANAGER v2.2${NC}"
+    echo -e "${WHITE}${BOLD}         HOTSPOT MANAGER v2.3${NC}"
     echo -e "${PURPLE}           By: senzore ganteng${NC}"
     echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
 }
@@ -134,7 +134,7 @@ install_dependencies() {
 }
 
 # ═══════════════════════════════════════════════════
-# DETECT HOTSPOT/TETHERING INTERFACE
+# DETECT HOTSPOT/TETHERING INTERFACE (IMPROVED)
 # ═══════════════════════════════════════════════════
 detect_hotspot_interface() {
     if [ $ROOT_AVAILABLE -eq 0 ]; then
@@ -142,14 +142,23 @@ detect_hotspot_interface() {
         return
     fi
     
-    # Check for common tethering interfaces
-    local interfaces=$(su -c "ip link show" 2>/dev/null | grep -E "wlan0|ap0|swlan0|softap0|rndis0" | awk -F: '{print $2}' | tr -d ' ')
+    TETHERING_ACTIVE=0
     
-    # Priority order for Realme devices
-    for iface in ap0 swlan0 softap0 wlan0 rndis0; do
-        if echo "$interfaces" | grep -q "^$iface$"; then
-            # Check if interface is UP
-            if su -c "ip link show $iface" 2>/dev/null | grep -q "state UP"; then
+    # Get all network interfaces
+    local all_ifaces=$(su -c "ip link show 2>/dev/null | grep -E '^[0-9]+:' | awk -F': ' '{print \$2}'" | tr -d ' ')
+    
+    # Check for interfaces with typical hotspot IP ranges
+    for iface in $all_ifaces; do
+        # Skip loopback
+        [ "$iface" == "lo" ] && continue
+        
+        # Check if interface has IP in hotspot range
+        local has_hotspot_ip=$(su -c "ip addr show $iface 2>/dev/null | grep -E 'inet (192\.168\.|10\.|172\.)' | grep -v '127.0.0.1'" 2>/dev/null)
+        
+        if [ -n "$has_hotspot_ip" ]; then
+            # Check if it's actually serving as gateway
+            local ip=$(echo "$has_hotspot_ip" | awk '{print $2}' | cut -d/ -f1)
+            if [[ "$ip" =~ \.1$ ]] || [[ "$ip" =~ \.254$ ]]; then
                 HOTSPOT_INTERFACE="$iface"
                 TETHERING_ACTIVE=1
                 return
@@ -157,54 +166,51 @@ detect_hotspot_interface() {
         fi
     done
     
-    # If no active interface, use default
-    for iface in ap0 wlan0; do
-        if echo "$interfaces" | grep -q "^$iface$"; then
-            HOTSPOT_INTERFACE="$iface"
-            return
+    # Fallback: Check common interface names
+    for iface in ap0 swlan0 softap0 wlan0 rndis0; do
+        if echo "$all_ifaces" | grep -q "^$iface$"; then
+            # Check if UP
+            if su -c "ip link show $iface 2>/dev/null | grep -q 'state UP'" 2>/dev/null; then
+                HOTSPOT_INTERFACE="$iface"
+                TETHERING_ACTIVE=1
+                return
+            fi
         fi
     done
     
+    # Default fallback
     HOTSPOT_INTERFACE="wlan0"
 }
 
 # ═══════════════════════════════════════════════════
-# GET DEVICE NAME FROM IP (FIXED)
+# GET DEVICE NAME FROM MAC (SIMPLIFIED)
 # ═══════════════════════════════════════════════════
 get_device_name() {
-    local ip=$1
-    local mac=$2
-    local device_name="Unknown"
+    local mac=$1
+    local device_name=""
     
-    # Validate inputs
-    [ -z "$ip" ] && echo "Unknown" && return
-    [ -z "$mac" ] && echo "Unknown" && return
+    # Skip if no MAC
+    [ -z "$mac" ] || [ "$mac" == "00:00:00:00:00:00" ] && echo "Unknown" && return
     
-    if [ $ROOT_AVAILABLE -eq 1 ]; then
-        # Try from DHCP leases
-        local lease_name=$(su -c "cat /data/misc/dhcp/dnsmasq.leases 2>/dev/null | grep -i '$mac' | awk '{print \$4}'" | head -1)
-        [ -n "$lease_name" ] && [ "$lease_name" != "*" ] && device_name="$lease_name"
-        
-        # If still unknown, check vendor from MAC prefix
-        if [ "$device_name" == "Unknown" ] && [ -n "$mac" ]; then
-            local vendor_prefix=$(echo "$mac" | cut -d: -f1-3 | tr '[:lower:]' '[:upper:]')
-            case $vendor_prefix in
-                "00:0C:29"|"00:50:56") device_name="VMware" ;;
-                "00:1B:44"|"00:1C:14"|"00:E0:4C") device_name="Realtek" ;;
-                "2C:4D:54") device_name="ASUS" ;;
-                "38:D5:47") device_name="Samsung" ;;
-                "3C:06:30") device_name="Xiaomi" ;;
-                "44:01:BB") device_name="OPPO/Realme" ;;
-                "50:C7:BF") device_name="TP-Link" ;;
-                "74:60:FA") device_name="OPPO/OnePlus" ;;
-                "8C:79:67") device_name="Huawei" ;;
-                "94:65:2D") device_name="OnePlus" ;;
-                "A4:C6:4F") device_name="Vivo" ;;
-                "DC:72:9B") device_name="Infinix" ;;
-                *) device_name="Device" ;;
-            esac
-        fi
-    fi
+    # Get vendor from MAC prefix
+    local vendor_prefix=$(echo "$mac" | cut -d: -f1-3 | tr '[:lower:]' '[:upper:]')
+    
+    case $vendor_prefix in
+        "00:0C:29"|"00:50:56") device_name="VMware" ;;
+        "00:1B:44"|"00:1C:14"|"00:E0:4C") device_name="Realtek" ;;
+        "2C:4D:54") device_name="ASUS" ;;
+        "38:D5:47"|"40:B0:76"|"84:11:9E") device_name="Samsung" ;;
+        "3C:06:30"|"50:8F:4C"|"7C:1D:D9") device_name="Xiaomi" ;;
+        "44:01:BB"|"E4:C2:39"|"AC:56:1C") device_name="OPPO/Realme" ;;
+        "50:C7:BF") device_name="TP-Link" ;;
+        "74:60:FA"|"DC:72:23") device_name="OPPO/OnePlus" ;;
+        "8C:79:67"|"48:01:C5") device_name="Huawei" ;;
+        "94:65:2D"|"C0:EE:FB") device_name="OnePlus" ;;
+        "A4:C6:4F"|"10:5A:17") device_name="Vivo" ;;
+        "DC:72:9B"|"84:F0:29") device_name="Infinix" ;;
+        "F8:E9:4E"|"AC:EE:9E") device_name="Apple" ;;
+        *) device_name="Device" ;;
+    esac
     
     echo "$device_name"
 }
@@ -217,9 +223,6 @@ init_config() {
     
     if [ ! -f "$CONFIG_FILE" ]; then
         cat > "$CONFIG_FILE" << EOF
-HOTSPOT_SSID="Termux_Hotspot"
-HOTSPOT_PASSWORD="termux123"
-HOTSPOT_MAX_CLIENTS=8
 DEFAULT_SPEED_LIMIT=0
 EOF
     fi
@@ -236,6 +239,8 @@ load_config() {
     if [ -f "$CONFIG_FILE" ]; then
         source "$CONFIG_FILE"
     fi
+    # Set default if not set
+    DEFAULT_SPEED_LIMIT=${DEFAULT_SPEED_LIMIT:-0}
 }
 
 # ═══════════════════════════════════════════════════
@@ -243,9 +248,6 @@ load_config() {
 # ═══════════════════════════════════════════════════
 save_config() {
     cat > "$CONFIG_FILE" << EOF
-HOTSPOT_SSID="$HOTSPOT_SSID"
-HOTSPOT_PASSWORD="$HOTSPOT_PASSWORD"
-HOTSPOT_MAX_CLIENTS=$HOTSPOT_MAX_CLIENTS
 DEFAULT_SPEED_LIMIT=$DEFAULT_SPEED_LIMIT
 EOF
 }
@@ -298,7 +300,7 @@ get_connected_clients() {
     
     detect_hotspot_interface
     
-    # Get clients from ARP table (more reliable)
+    # Get clients from ARP table
     su -c "ip neigh show dev $HOTSPOT_INTERFACE" 2>/dev/null | grep -E "REACHABLE|STALE|DELAY" | awk '{print $1" "$5}' | grep -v "00:00:00:00:00:00"
     
     # Alternative: check ARP cache
@@ -328,29 +330,75 @@ get_network_stats() {
 }
 
 # ═══════════════════════════════════════════════════
-# REALTIME STATS MONITOR (FIXED - no spam)
+# REALTIME STATS MONITOR (FIXED)
 # ═══════════════════════════════════════════════════
 realtime_stats() {
-    detect_hotspot_interface
-    local interface=$HOTSPOT_INTERFACE
-    
     show_banner
     echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
     echo -e "${CYAN}${BOLD}           REAL-TIME STATISTICS${NC}"
     echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
-    echo -e "${YELLOW}Interface: $interface${NC}"
+    
+    # Force detection
+    detect_hotspot_interface
+    local interface=$HOTSPOT_INTERFACE
+    
+    echo -e "${YELLOW}Detecting active interface...${NC}"
+    
+    # Try to find active tethering interface more aggressively
+    if [ $ROOT_AVAILABLE -eq 1 ]; then
+        # List all interfaces with IPs
+        echo -e "${CYAN}Checking interfaces...${NC}"
+        
+        # Find interface serving as gateway
+        for test_iface in $(su -c "ip link show | grep -E '^[0-9]+:' | awk -F': ' '{print \$2}' | tr -d ' '" 2>/dev/null); do
+            # Skip lo
+            [ "$test_iface" == "lo" ] && continue
+            
+            # Check if has gateway IP
+            local test_ip=$(su -c "ip addr show $test_iface 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | awk '{print \$2}'" | cut -d/ -f1)
+            
+            if [ -n "$test_ip" ] && [[ "$test_ip" =~ (192\.168\.|10\.|172\.) ]]; then
+                # Check if stats file exists
+                if [ -f "/sys/class/net/$test_iface/statistics/rx_bytes" ] || su -c "[ -f /sys/class/net/$test_iface/statistics/rx_bytes ]" 2>/dev/null; then
+                    interface="$test_iface"
+                    echo -e "${GREEN}[✓] Found active interface: $interface ($test_ip)${NC}"
+                    break
+                fi
+            fi
+        done
+    fi
+    
+    echo -e "${CYAN}Using Interface: $interface${NC}"
     echo -e "${YELLOW}Press Ctrl+C to exit${NC}\n"
     
-    if [ ! -f "/sys/class/net/$interface/statistics/rx_bytes" ]; then
-        echo -e "${RED}[✗] Interface not found or inactive${NC}"
+    # Check access to stats
+    local stats_readable=0
+    if [ -f "/sys/class/net/$interface/statistics/rx_bytes" ]; then
+        stats_readable=1
+    elif [ $ROOT_AVAILABLE -eq 1 ] && su -c "[ -f /sys/class/net/$interface/statistics/rx_bytes ]" 2>/dev/null; then
+        stats_readable=1
+    fi
+    
+    if [ $stats_readable -eq 0 ]; then
+        echo -e "${RED}[✗] Cannot read statistics for $interface${NC}"
+        echo -e "${YELLOW}[!] Please make sure hotspot is active${NC}"
         read -p "Press Enter to continue..."
         return
     fi
     
-    local prev_rx=$(cat /sys/class/net/$interface/statistics/rx_bytes 2>/dev/null || echo 0)
-    local prev_tx=$(cat /sys/class/net/$interface/statistics/tx_bytes 2>/dev/null || echo 0)
+    # Get initial values
+    local prev_rx=0
+    local prev_tx=0
     
-    # Ensure we have valid starting values
+    if [ $ROOT_AVAILABLE -eq 1 ]; then
+        prev_rx=$(su -c "cat /sys/class/net/$interface/statistics/rx_bytes 2>/dev/null" || echo 0)
+        prev_tx=$(su -c "cat /sys/class/net/$interface/statistics/tx_bytes 2>/dev/null" || echo 0)
+    else
+        prev_rx=$(cat /sys/class/net/$interface/statistics/rx_bytes 2>/dev/null || echo 0)
+        prev_tx=$(cat /sys/class/net/$interface/statistics/tx_bytes 2>/dev/null || echo 0)
+    fi
+    
+    # Ensure valid starting values
     prev_rx=${prev_rx:-0}
     prev_tx=${prev_tx:-0}
     
@@ -363,8 +411,16 @@ realtime_stats() {
     while true; do
         sleep 1
         
-        local curr_rx=$(cat /sys/class/net/$interface/statistics/rx_bytes 2>/dev/null || echo 0)
-        local curr_tx=$(cat /sys/class/net/$interface/statistics/tx_bytes 2>/dev/null || echo 0)
+        local curr_rx=0
+        local curr_tx=0
+        
+        if [ $ROOT_AVAILABLE -eq 1 ]; then
+            curr_rx=$(su -c "cat /sys/class/net/$interface/statistics/rx_bytes 2>/dev/null" || echo 0)
+            curr_tx=$(su -c "cat /sys/class/net/$interface/statistics/tx_bytes 2>/dev/null" || echo 0)
+        else
+            curr_rx=$(cat /sys/class/net/$interface/statistics/rx_bytes 2>/dev/null || echo 0)
+            curr_tx=$(cat /sys/class/net/$interface/statistics/tx_bytes 2>/dev/null || echo 0)
+        fi
         
         # Ensure valid values
         curr_rx=${curr_rx:-0}
@@ -383,8 +439,8 @@ realtime_stats() {
         local total_rx_mb=$(echo "scale=2; $curr_rx / 1048576" | bc 2>/dev/null || echo "0")
         local total_tx_mb=$(echo "scale=2; $curr_tx / 1048576" | bc 2>/dev/null || echo "0")
         
-        # Move cursor to position and clear from there
-        tput cup 7 0 2>/dev/null
+        # Move cursor and clear
+        tput cup 10 0 2>/dev/null
         tput ed 2>/dev/null
         
         echo -e "${GREEN}╔════════════════════════════════════════════════╗${NC}"
@@ -401,8 +457,10 @@ realtime_stats() {
             if [ -n "$clients" ]; then
                 echo "$clients" | while read ip mac; do
                     [ -z "$ip" ] && continue
-                    local device_name=$(get_device_name "$ip" "$mac")
-                    echo -e "  ${CYAN}•${NC} $ip ($mac) - ${WHITE}$device_name${NC}"
+                    local device_name=$(get_device_name "$mac")
+                    local limit=$(grep "^$ip " "$CLIENTS_FILE" 2>/dev/null | awk '{print $2}')
+                    [ -z "$limit" ] || [ "$limit" == "0" ] && limit="∞" || limit="${limit} KB/s"
+                    echo -e "  ${CYAN}•${NC} $ip - ${WHITE}$device_name${NC} (Speed: ${YELLOW}$limit${NC})"
                 done
             else
                 echo -e "  ${RED}No clients${NC}"
@@ -510,11 +568,11 @@ set_client_speed_limit() {
         client_list[$count]="$line"
         local ip=$(echo "$line" | awk '{print $1}')
         local mac=$(echo "$line" | awk '{print $2}')
-        local device_name=$(get_device_name "$ip" "$mac")
+        local device_name=$(get_device_name "$mac")
         local current_limit=$(grep "^$ip " "$CLIENTS_FILE" 2>/dev/null | awk '{print $2}')
-        [ -z "$current_limit" ] && current_limit="unlimited"
+        [ -z "$current_limit" ] || [ "$current_limit" == "0" ] && current_limit="unlimited" || current_limit="${current_limit} KB/s"
         
-        printf "${CYAN}%2d.${NC} IP: ${WHITE}%-15s${NC} MAC: ${PURPLE}%-17s${NC} Device: ${GREEN}%-15s${NC} Limit: ${YELLOW}%s${NC}\n" \
+        printf "${CYAN}%2d.${NC} IP: ${WHITE}%-15s${NC} ${PURPLE}%-17s${NC} ${GREEN}%-12s${NC} Limit: ${YELLOW}%s${NC}\n" \
             "$count" "$ip" "$mac" "$device_name" "$current_limit"
         
         count=$((count + 1))
@@ -599,8 +657,8 @@ block_client() {
         client_list[$count]="$line"
         local ip=$(echo "$line" | awk '{print $1}')
         local mac=$(echo "$line" | awk '{print $2}')
-        local device_name=$(get_device_name "$ip" "$mac")
-        printf "${CYAN}%2d.${NC} IP: ${WHITE}%-15s${NC} MAC: ${PURPLE}%-17s${NC} Device: ${GREEN}%s${NC}\n" "$count" "$ip" "$mac" "$device_name"
+        local device_name=$(get_device_name "$mac")
+        printf "${CYAN}%2d.${NC} IP: ${WHITE}%-15s${NC} ${PURPLE}%-17s${NC} ${GREEN}%s${NC}\n" "$count" "$ip" "$mac" "$device_name"
         count=$((count + 1))
     done <<< "$clients"
     
@@ -659,8 +717,8 @@ unblock_client() {
         blocked_list[$count]="$line"
         local ip=$(echo "$line" | awk '{print $1}')
         local mac=$(echo "$line" | awk '{print $2}')
-        local device_name=$(get_device_name "$ip" "$mac")
-        printf "${CYAN}%2d.${NC} IP: ${WHITE}%-15s${NC} MAC: ${PURPLE}%-17s${NC} Device: ${GREEN}%s${NC}\n" "$count" "$ip" "$mac" "$device_name"
+        local device_name=$(get_device_name "$mac")
+        printf "${CYAN}%2d.${NC} IP: ${WHITE}%-15s${NC} ${PURPLE}%-17s${NC} ${GREEN}%s${NC}\n" "$count" "$ip" "$mac" "$device_name"
         count=$((count + 1))
     done < "$BLOCKED_FILE"
     
@@ -720,8 +778,8 @@ kick_client() {
         client_list[$count]="$line"
         local ip=$(echo "$line" | awk '{print $1}')
         local mac=$(echo "$line" | awk '{print $2}')
-        local device_name=$(get_device_name "$ip" "$mac")
-        printf "${CYAN}%2d.${NC} IP: ${WHITE}%-15s${NC} MAC: ${PURPLE}%-17s${NC} Device: ${GREEN}%s${NC}\n" "$count" "$ip" "$mac" "$device_name"
+        local device_name=$(get_device_name "$mac")
+        printf "${CYAN}%2d.${NC} IP: ${WHITE}%-15s${NC} ${PURPLE}%-17s${NC} ${GREEN}%s${NC}\n" "$count" "$ip" "$mac" "$device_name"
         count=$((count + 1))
     done <<< "$clients"
     
@@ -748,76 +806,6 @@ kick_client() {
 }
 
 # ═══════════════════════════════════════════════════
-# HOTSPOT SETTINGS
-# ═══════════════════════════════════════════════════
-hotspot_settings() {
-    while true; do
-        show_banner
-        load_config
-        
-        echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
-        echo -e "${CYAN}${BOLD}            HOTSPOT SETTINGS${NC}"
-        echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
-        
-        echo -e "${YELLOW}Current Settings:${NC}\n"
-        echo -e "${CYAN}1.${NC} SSID:              ${WHITE}$HOTSPOT_SSID${NC}"
-        echo -e "${CYAN}2.${NC} Password:          ${WHITE}$(echo $HOTSPOT_PASSWORD | sed 's/./*/g')${NC}"
-        echo -e "${CYAN}3.${NC} Max Clients:       ${WHITE}$HOTSPOT_MAX_CLIENTS${NC}"
-        echo -e "${CYAN}4.${NC} Default Speed:     ${WHITE}$DEFAULT_SPEED_LIMIT KB/s${NC}"
-        echo ""
-        echo -e "${CYAN}0.${NC} Back"
-        echo ""
-        echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
-        
-        read -p "$(echo -e ${GREEN}Choose: ${NC})" choice
-        
-        case $choice in
-            1)
-                read -p "New SSID: " new_ssid
-                if [ -n "$new_ssid" ]; then
-                    HOTSPOT_SSID="$new_ssid"
-                    save_config
-                    echo -e "${GREEN}[✓] Saved${NC}"
-                    sleep 1
-                fi
-                ;;
-            2)
-                read -p "New password (min 8 chars): " new_pass
-                if [ ${#new_pass} -ge 8 ]; then
-                    HOTSPOT_PASSWORD="$new_pass"
-                    save_config
-                    echo -e "${GREEN}[✓] Saved${NC}"
-                else
-                    echo -e "${RED}[✗] Too short${NC}"
-                fi
-                sleep 1
-                ;;
-            3)
-                read -p "Max clients [1-10]: " max_clients
-                if [ "$max_clients" -ge 1 ] && [ "$max_clients" -le 10 ]; then
-                    HOTSPOT_MAX_CLIENTS=$max_clients
-                    save_config
-                    echo -e "${GREEN}[✓] Saved${NC}"
-                else
-                    echo -e "${RED}[✗] Invalid${NC}"
-                fi
-                sleep 1
-                ;;
-            4)
-                read -p "Default speed limit (KB/s, 0=unlimited): " speed
-                DEFAULT_SPEED_LIMIT=$speed
-                save_config
-                echo -e "${GREEN}[✓] Saved${NC}"
-                sleep 1
-                ;;
-            0)
-                break
-                ;;
-        esac
-    done
-}
-
-# ═══════════════════════════════════════════════════
 # CLIENT MANAGEMENT MENU
 # ═══════════════════════════════════════════════════
 client_management() {
@@ -834,10 +822,10 @@ client_management() {
                 while IFS= read -r line; do
                     local ip=$(echo "$line" | awk '{print $1}')
                     local mac=$(echo "$line" | awk '{print $2}')
-                    local device_name=$(get_device_name "$ip" "$mac")
+                    local device_name=$(get_device_name "$mac")
                     local limit=$(grep "^$ip " "$CLIENTS_FILE" 2>/dev/null | awk '{print $2}')
-                    [ -z "$limit" ] && limit="∞"
-                    printf "${CYAN}•${NC} ${WHITE}%-15s${NC} ${PURPLE}%-17s${NC} ${GREEN}%-15s${NC} ${YELLOW}%s KB/s${NC}\n" "$ip" "$mac" "$device_name" "$limit"
+                    [ -z "$limit" ] || [ "$limit" == "0" ] && limit="∞" || limit="${limit} KB/s"
+                    printf "${CYAN}•${NC} ${WHITE}%-15s${NC} ${PURPLE}%-17s${NC} ${GREEN}%-12s${NC} ${YELLOW}%s${NC}\n" "$ip" "$mac" "$device_name" "$limit"
                 done <<< "$clients"
             else
                 echo -e "${RED}No clients connected${NC}"
@@ -890,10 +878,9 @@ main_menu() {
         echo -e "${CYAN}${BOLD}               MAIN MENU${NC}"
         echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
         
-        echo -e "${CYAN}1.${NC} Hotspot Settings"
-        echo -e "${CYAN}2.${NC} Client Management"
-        echo -e "${CYAN}3.${NC} Real-time Statistics"
-        echo -e "${CYAN}4.${NC} About"
+        echo -e "${CYAN}1.${NC} Client Management"
+        echo -e "${CYAN}2.${NC} Real-time Statistics"
+        echo -e "${CYAN}3.${NC} About"
         echo -e "${CYAN}0.${NC} Exit"
         echo ""
         echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
@@ -901,10 +888,9 @@ main_menu() {
         read -p "$(echo -e ${GREEN}Choose: ${NC})" choice
         
         case $choice in
-            1) hotspot_settings ;;
-            2) client_management ;;
-            3) realtime_stats ;;
-            4) show_about ;;
+            1) client_management ;;
+            2) realtime_stats ;;
+            3) show_about ;;
             0)
                 echo -e "\n${CYAN}Thank you!${NC}"
                 echo -e "${PURPLE}By: senzore ganteng${NC}\n"
@@ -923,15 +909,15 @@ show_about() {
     echo -e "${CYAN}${BOLD}                 ABOUT${NC}"
     echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
     
-    echo -e "${WHITE}${BOLD}Hotspot Manager v2.2${NC}"
+    echo -e "${WHITE}${BOLD}Hotspot Manager v2.3${NC}"
     echo -e "${YELLOW}Advanced Tethering Management for Android${NC}\n"
     
     echo -e "${CYAN}Features:${NC}"
     echo -e "${GREEN}✓${NC} Root & Magisk detection"
-    echo -e "${GREEN}✓${NC} Real-time statistics (non-spamming)"
+    echo -e "${GREEN}✓${NC} Real-time statistics"
     echo -e "${GREEN}✓${NC} Per-client speed limiting"
     echo -e "${GREEN}✓${NC} Client blocking/kicking"
-    echo -e "${GREEN}✓${NC} Device name detection"
+    echo -e "${GREEN}✓${NC} Device identification"
     echo -e "${GREEN}✓${NC} Realme/ColorOS optimized"
     
     echo ""
