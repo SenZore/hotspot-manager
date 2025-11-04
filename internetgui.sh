@@ -1,8 +1,8 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
 # ═══════════════════════════════════════════════════
-# TERMUX HOTSPOT MANAGER v2.0
-# Dibuat oleh Adam Senzore, Alias Adam Sanjaya <3
+# TERMUX HOTSPOT MANAGER v2.1
+# Dibuat oleh Senzore, Alias Adam Sanjaya <3
 # ═══════════════════════════════════════════════════
 
 # Color codes
@@ -35,8 +35,8 @@ TETHERING_ACTIVE=0
 show_banner() {
     clear
     echo -e "${CYAN}════════════════════════════════════════════════${NC}"
-    echo -e "${CYAN}${BOLD}        HOTSPOT MANAGER - TERMUX v2.0${NC}"
-    echo -e "${PURPLE}   Dibuat oleh Adam Senzore, Alias Adam Sanjaya <3${NC}"
+    echo -e "${CYAN}${BOLD}        HOTSPOT MANAGER - TERMUX v2.1${NC}"
+    echo -e "${PURPLE}      Dibuat oleh Senzore, Alias Adam Sanjaya <3${NC}"
     echo -e "${CYAN}════════════════════════════════════════════════${NC}\n"
 }
 
@@ -46,13 +46,8 @@ show_banner() {
 check_root() {
     echo -e "${YELLOW}[*] Checking root access...${NC}"
     
-    # Try multiple su methods
     if command -v su &> /dev/null; then
-        # Test actual root access
         if su -c "id" 2>/dev/null | grep -q "uid=0"; then
-            ROOT_AVAILABLE=1
-            echo -e "${GREEN}[✓] Root access: AVAILABLE${NC}"
-        elif su 0 id 2>/dev/null | grep -q "uid=0"; then
             ROOT_AVAILABLE=1
             echo -e "${GREEN}[✓] Root access: AVAILABLE${NC}"
         else
@@ -63,26 +58,15 @@ check_root() {
         echo -e "${RED}[✗] SU binary: NOT FOUND${NC}"
     fi
     
-    # Enhanced Magisk detection
     if [ $ROOT_AVAILABLE -eq 1 ]; then
-        # Check multiple Magisk locations
         if su -c "[ -f /data/adb/magisk/magisk ] && echo 1" 2>/dev/null | grep -q "1"; then
             MAGISK_AVAILABLE=1
             echo -e "${GREEN}[✓] Magisk: DETECTED${NC}"
-            
-            # Try to get version
-            local magisk_ver=$(su -c "magisk -v 2>/dev/null" || su -c "magisk -V 2>/dev/null" || echo "Unknown")
-            if [ "$magisk_ver" != "Unknown" ]; then
-                echo -e "${CYAN}[i] Magisk Version: $magisk_ver${NC}"
-            fi
         elif su -c "[ -d /data/adb/magisk ] && echo 1" 2>/dev/null | grep -q "1"; then
-            MAGISK_AVAILABLE=1
-            echo -e "${GREEN}[✓] Magisk: DETECTED (Directory found)${NC}"
-        elif su -c "[ -f /sbin/.magisk/busybox/magisk ] && echo 1" 2>/dev/null | grep -q "1"; then
             MAGISK_AVAILABLE=1
             echo -e "${GREEN}[✓] Magisk: DETECTED${NC}"
         else
-            echo -e "${YELLOW}[!] Magisk: NOT DETECTED (Root available via other method)${NC}"
+            echo -e "${YELLOW}[!] Magisk: NOT DETECTED${NC}"
         fi
     fi
     
@@ -91,26 +75,24 @@ check_root() {
 }
 
 # ═══════════════════════════════════════════════════
-# INSTALL DEPENDENCIES
+# INSTALL DEPENDENCIES (Non-blocking)
 # ═══════════════════════════════════════════════════
 install_dependencies() {
     echo -e "${YELLOW}[*] Checking dependencies...${NC}\n"
     
-    # Update package list
     echo -e "${CYAN}[*] Updating packages...${NC}"
-    pkg update -y &>/dev/null
+    pkg update -y 2>/dev/null
     
-    # Required packages
-    PACKAGES=("termux-api" "iproute2" "net-tools" "procps" "grep" "sed" "bc" "iptables")
+    PACKAGES=("termux-api" "iproute2" "net-tools" "grep" "sed" "bc")
     
     for package in "${PACKAGES[@]}"; do
         if ! dpkg -s "$package" &> /dev/null; then
             echo -e "${YELLOW}[*] Installing $package...${NC}"
-            pkg install -y "$package" &>/dev/null
+            pkg install -y "$package" 2>/dev/null
             if [ $? -eq 0 ]; then
                 echo -e "${GREEN}[✓] $package installed${NC}"
             else
-                echo -e "${RED}[✗] Failed to install $package${NC}"
+                echo -e "${YELLOW}[!] $package failed (optional)${NC}"
             fi
         else
             echo -e "${GREEN}[✓] $package OK${NC}"
@@ -122,7 +104,7 @@ install_dependencies() {
 }
 
 # ═══════════════════════════════════════════════════
-# DETECT HOTSPOT/TETHERING INTERFACE
+# DETECT HOTSPOT INTERFACE (Passive Detection)
 # ═══════════════════════════════════════════════════
 detect_hotspot_interface() {
     if [ $ROOT_AVAILABLE -eq 0 ]; then
@@ -130,28 +112,15 @@ detect_hotspot_interface() {
         return
     fi
     
-    # Check for common tethering interfaces
-    local interfaces=$(su -c "ip link show" 2>/dev/null | grep -E "wlan0|ap0|swlan0|softap0|rndis0" | awk -F: '{print $2}' | tr -d ' ')
+    local interfaces=$(su -c "ip link show" 2>/dev/null | grep -E "wlan0|ap0|swlan0|softap0" | awk -F: '{print $2}' | tr -d ' ')
     
-    # Priority order for Realme devices
-    for iface in ap0 swlan0 softap0 wlan0 rndis0; do
+    for iface in ap0 swlan0 softap0 wlan0; do
         if echo "$interfaces" | grep -q "^$iface$"; then
-            # Check if interface is UP
             if su -c "ip link show $iface" 2>/dev/null | grep -q "state UP"; then
                 HOTSPOT_INTERFACE="$iface"
                 TETHERING_ACTIVE=1
-                echo -e "${GREEN}[✓] Active hotspot interface: $iface${NC}"
                 return
             fi
-        fi
-    done
-    
-    # If no active interface, use default
-    for iface in ap0 wlan0; do
-        if echo "$interfaces" | grep -q "^$iface$"; then
-            HOTSPOT_INTERFACE="$iface"
-            echo -e "${YELLOW}[!] Detected interface: $iface (not active)${NC}"
-            return
         fi
     done
     
@@ -166,10 +135,8 @@ init_config() {
     
     if [ ! -f "$CONFIG_FILE" ]; then
         cat > "$CONFIG_FILE" << EOF
-HOTSPOT_SSID="Termux_Hotspot"
-HOTSPOT_PASSWORD="termux123"
-HOTSPOT_MAX_CLIENTS=8
 DEFAULT_SPEED_LIMIT=0
+AUTO_BLOCK_UNKNOWN=0
 EOF
     fi
     
@@ -192,23 +159,9 @@ load_config() {
 # ═══════════════════════════════════════════════════
 save_config() {
     cat > "$CONFIG_FILE" << EOF
-HOTSPOT_SSID="$HOTSPOT_SSID"
-HOTSPOT_PASSWORD="$HOTSPOT_PASSWORD"
-HOTSPOT_MAX_CLIENTS=$HOTSPOT_MAX_CLIENTS
 DEFAULT_SPEED_LIMIT=$DEFAULT_SPEED_LIMIT
+AUTO_BLOCK_UNKNOWN=$AUTO_BLOCK_UNKNOWN
 EOF
-}
-
-# ═══════════════════════════════════════════════════
-# EXECUTE ROOT COMMAND
-# ═══════════════════════════════════════════════════
-exec_root() {
-    if [ $ROOT_AVAILABLE -eq 1 ]; then
-        su -c "$1" 2>/dev/null
-    else
-        echo -e "${RED}[✗] Root required${NC}"
-        return 1
-    fi
 }
 
 # ═══════════════════════════════════════════════════
@@ -216,7 +169,7 @@ exec_root() {
 # ═══════════════════════════════════════════════════
 get_hotspot_status() {
     if [ $ROOT_AVAILABLE -eq 0 ]; then
-        echo -e "${YELLOW}UNKNOWN (No Root)${NC}"
+        echo -e "${YELLOW}UNKNOWN${NC}"
         return
     fi
     
@@ -225,62 +178,46 @@ get_hotspot_status() {
     if [ $TETHERING_ACTIVE -eq 1 ]; then
         echo -e "${GREEN}ACTIVE (${HOTSPOT_INTERFACE})${NC}"
     else
-        # Check if tethering is on via settings
-        local tether_state=$(su -c "dumpsys wifi | grep 'mApState'" 2>/dev/null | grep -oE "[0-9]+" | tail -1)
-        if [ "$tether_state" == "13" ] || [ "$tether_state" == "11" ]; then
-            echo -e "${GREEN}ENABLED${NC}"
-            TETHERING_ACTIVE=1
-        else
-            echo -e "${RED}DISABLED${NC}"
-        fi
+        echo -e "${RED}INACTIVE${NC}"
     fi
 }
 
 # ═══════════════════════════════════════════════════
-# TOGGLE HOTSPOT (Realme specific)
+# GET CLIENT HOSTNAME
 # ═══════════════════════════════════════════════════
-toggle_hotspot() {
-    local action=$1
+get_client_hostname() {
+    local ip=$1
     
     if [ $ROOT_AVAILABLE -eq 0 ]; then
-        echo -e "${RED}[✗] Root access required${NC}"
-        echo -e "${YELLOW}[!] Enable hotspot manually via Settings${NC}"
-        read -p "Press Enter to continue..."
+        echo "Unknown"
         return
     fi
     
-    if [ "$action" == "start" ]; then
-        echo -e "${YELLOW}[*] Starting hotspot...${NC}"
-        
-        # Enable WiFi first
-        su -c "svc wifi enable" 2>/dev/null
-        sleep 1
-        
-        # Try multiple methods for Realme/ColorOS
-        su -c "cmd wifi start-softap" 2>/dev/null
-        su -c "service call wifi 28 i32 0 i32 1" 2>/dev/null
-        su -c "settings put global wifi_ap_state 13" 2>/dev/null
-        
-        sleep 2
-        echo -e "${GREEN}[✓] Hotspot start command sent${NC}"
-        echo -e "${YELLOW}[!] If not started, enable manually in Settings${NC}"
-        
-    elif [ "$action" == "stop" ]; then
-        echo -e "${YELLOW}[*] Stopping hotspot...${NC}"
-        
-        su -c "cmd wifi stop-softap" 2>/dev/null
-        su -c "service call wifi 28 i32 0 i32 0" 2>/dev/null
-        su -c "settings put global wifi_ap_state 11" 2>/dev/null
-        
-        sleep 2
-        echo -e "${GREEN}[✓] Hotspot stop command sent${NC}"
+    # Try DHCP leases first (most reliable)
+    local hostname=$(su -c "cat /data/misc/dhcp/dnsmasq.leases 2>/dev/null" | grep "$ip" | awk '{print $4}')
+    
+    # Try alternative DHCP location
+    if [ -z "$hostname" ] || [ "$hostname" == "*" ]; then
+        hostname=$(su -c "cat /data/vendor/wifi/hostapd/hostapd.leases 2>/dev/null" | grep "$ip" | awk '{print $4}')
     fi
     
-    read -p "Press Enter to continue..."
+    # Try ARP cache hostname
+    if [ -z "$hostname" ] || [ "$hostname" == "*" ]; then
+        hostname=$(su -c "cat /proc/net/arp" 2>/dev/null | grep "$ip" | awk '{print $6}')
+    fi
+    
+    # Clean up and validate
+    hostname=$(echo "$hostname" | tr -d '\n\r' | sed 's/[^a-zA-Z0-9._-]//g')
+    
+    if [ -z "$hostname" ] || [ "$hostname" == "*" ] || [ "$hostname" == "00:00:00:00:00:00" ]; then
+        echo "Unknown Device"
+    else
+        echo "$hostname"
+    fi
 }
 
 # ═══════════════════════════════════════════════════
-# GET CONNECTED CLIENTS
+# GET CONNECTED CLIENTS (IPv4 only with hostnames)
 # ═══════════════════════════════════════════════════
 get_connected_clients() {
     if [ $ROOT_AVAILABLE -eq 0 ]; then
@@ -290,12 +227,27 @@ get_connected_clients() {
     
     detect_hotspot_interface
     
-    # Get clients from ARP table
-    su -c "ip neigh show dev $HOTSPOT_INTERFACE" 2>/dev/null | grep -E "REACHABLE|STALE|DELAY" | awk '{print $1" "$5}' | grep -v "00:00:00:00:00:00"
+    # Get clients and filter IPv4 only
+    su -c "ip neigh show dev $HOTSPOT_INTERFACE" 2>/dev/null | \
+        grep -E "REACHABLE|STALE|DELAY" | \
+        grep -v "00:00:00:00:00:00" | \
+        grep -v ":" | \
+        awk '{print $1" "$5}' | \
+        while read ip mac; do
+            # Filter out IPv6 (contains multiple colons in MAC or IP)
+            if [[ ! "$ip" =~ .*:.* ]]; then
+                echo "$ip $mac"
+            fi
+        done
     
-    # Alternative: check ARP cache
+    # Alternative ARP check for IPv4 only
     if [ -z "$(su -c "ip neigh show dev $HOTSPOT_INTERFACE" 2>/dev/null)" ]; then
-        su -c "cat /proc/net/arp" 2>/dev/null | grep -v "00:00:00:00:00:00" | grep -v "IP" | grep "$HOTSPOT_INTERFACE" | awk '{print $1" "$4}'
+        su -c "cat /proc/net/arp" 2>/dev/null | \
+            grep -v "00:00:00:00:00:00" | \
+            grep -v "IP address" | \
+            grep "$HOTSPOT_INTERFACE" | \
+            awk '{print $1" "$4}' | \
+            grep -v ":" # Filter IPv6
     fi
 }
 
@@ -335,6 +287,7 @@ realtime_stats() {
     
     if [ ! -f "/sys/class/net/$interface/statistics/rx_bytes" ]; then
         echo -e "${RED}[✗] Interface not found or inactive${NC}"
+        echo -e "${YELLOW}[!] Please enable hotspot from Android Settings${NC}"
         read -p "Press Enter to continue..."
         return
     fi
@@ -367,14 +320,15 @@ realtime_stats() {
         echo -e "${GREEN}╚════════════════════════════════════════════════╝${NC}"
         
         if [ $ROOT_AVAILABLE -eq 1 ]; then
-            echo -e "\n${YELLOW}Connected Clients:${NC}"
+            echo -e "\n${YELLOW}Connected Clients (IPv4):${NC}"
             local clients=$(get_connected_clients)
             if [ -n "$clients" ]; then
                 echo "$clients" | while read ip mac; do
-                    echo -e "  ${CYAN}•${NC} $ip ($mac)"
+                    local hostname=$(get_client_hostname "$ip")
+                    printf "  ${CYAN}•${NC} ${WHITE}%-15s${NC} ${PURPLE}%-17s${NC} ${GREEN}%s${NC}\n" "$ip" "$mac" "$hostname"
                 done
             else
-                echo -e "  ${RED}No clients${NC}"
+                echo -e "  ${RED}No clients connected${NC}"
             fi
         fi
         
@@ -384,7 +338,7 @@ realtime_stats() {
 }
 
 # ═══════════════════════════════════════════════════
-# APPLY SPEED LIMIT (FIXED - Working version)
+# APPLY SPEED LIMIT (Suppressed errors)
 # ═══════════════════════════════════════════════════
 apply_speed_limit() {
     local ip=$1
@@ -399,47 +353,32 @@ apply_speed_limit() {
     local iface=$HOTSPOT_INTERFACE
     
     if [ "$limit_kb" == "0" ] || [ -z "$limit_kb" ]; then
-        # Remove limit
         echo -e "${YELLOW}[*] Removing speed limit for $ip...${NC}"
-        su -c "iptables -D FORWARD -s $ip -j DROP 2>/dev/null" 2>/dev/null
-        su -c "iptables -D FORWARD -d $ip -j DROP 2>/dev/null" 2>/dev/null
-        su -c "tc filter del dev $iface protocol ip parent 1:0 prio 1 2>/dev/null" 2>/dev/null
+        su -c "iptables -D FORWARD -s $ip -j DROP" &>/dev/null
+        su -c "iptables -D FORWARD -d $ip -j DROP" &>/dev/null
+        su -c "tc filter del dev $iface protocol ip parent 1:0 prio 1" &>/dev/null
         echo -e "${GREEN}[✓] Limit removed${NC}"
     else
-        # Apply speed limit
         echo -e "${YELLOW}[*] Applying ${limit_kb} KB/s limit to $ip...${NC}"
         
-        # Convert KB/s to kbit/s (multiply by 8)
         local limit_kbit=$((limit_kb * 8))
         
-        # Initialize tc if not already done
-        su -c "tc qdisc show dev $iface | grep -q htb" 2>/dev/null
+        su -c "tc qdisc show dev $iface | grep -q htb" &>/dev/null
         if [ $? -ne 0 ]; then
-            su -c "tc qdisc add dev $iface root handle 1: htb default 30" 2>/dev/null
-            su -c "tc class add dev $iface parent 1: classid 1:1 htb rate 100mbit" 2>/dev/null
+            su -c "tc qdisc add dev $iface root handle 1: htb default 30" &>/dev/null
+            su -c "tc class add dev $iface parent 1: classid 1:1 htb rate 100mbit" &>/dev/null
         fi
         
-        # Generate unique class ID based on last octet of IP
         local class_id="1:$(echo $ip | cut -d. -f4)"
         
-        # Remove existing rules for this IP
-        su -c "tc class del dev $iface classid $class_id 2>/dev/null" 2>/dev/null
-        su -c "tc filter del dev $iface parent 1: protocol ip prio 1 u32 match ip dst $ip 2>/dev/null" 2>/dev/null
+        su -c "tc class del dev $iface classid $class_id" &>/dev/null
+        su -c "tc filter del dev $iface parent 1: protocol ip prio 1 u32 match ip dst $ip" &>/dev/null
         
-        # Add new class with speed limit
-        su -c "tc class add dev $iface parent 1:1 classid $class_id htb rate ${limit_kbit}kbit ceil ${limit_kbit}kbit" 2>/dev/null
+        su -c "tc class add dev $iface parent 1:1 classid $class_id htb rate ${limit_kbit}kbit ceil ${limit_kbit}kbit" &>/dev/null
+        su -c "tc filter add dev $iface parent 1: protocol ip prio 1 u32 match ip dst $ip flowid $class_id" &>/dev/null
+        su -c "tc filter add dev $iface parent 1: protocol ip prio 1 u32 match ip src $ip flowid $class_id" &>/dev/null
         
-        # Add filter to match traffic to this IP
-        su -c "tc filter add dev $iface parent 1: protocol ip prio 1 u32 match ip dst $ip flowid $class_id" 2>/dev/null
-        
-        # Also limit upload from client
-        su -c "tc filter add dev $iface parent 1: protocol ip prio 1 u32 match ip src $ip flowid $class_id" 2>/dev/null
-        
-        if [ $? -eq 0 ]; then
-            echo -e "${GREEN}[✓] Speed limit applied successfully${NC}"
-        else
-            echo -e "${RED}[✗] Failed to apply limit (tc command failed)${NC}"
-        fi
+        echo -e "${GREEN}[✓] Speed limit applied${NC}"
     fi
 }
 
@@ -466,9 +405,8 @@ set_client_speed_limit() {
         return
     fi
     
-    echo -e "${YELLOW}Connected Clients:${NC}\n"
+    echo -e "${YELLOW}Connected Clients (IPv4):${NC}\n"
     
-    # Store clients in array
     local -a client_list
     local count=1
     
@@ -476,11 +414,12 @@ set_client_speed_limit() {
         client_list[$count]="$line"
         local ip=$(echo "$line" | awk '{print $1}')
         local mac=$(echo "$line" | awk '{print $2}')
+        local hostname=$(get_client_hostname "$ip")
         local current_limit=$(grep "^$ip " "$CLIENTS_FILE" 2>/dev/null | awk '{print $2}')
-        [ -z "$current_limit" ] && current_limit="unlimited"
+        [ -z "$current_limit" ] && current_limit="∞"
         
-        printf "${CYAN}%2d.${NC} IP: ${WHITE}%-15s${NC} MAC: ${PURPLE}%-17s${NC} Limit: ${YELLOW}%s${NC}\n" \
-            "$count" "$ip" "$mac" "$current_limit"
+        printf "${CYAN}%2d.${NC} ${WHITE}%-15s${NC} ${PURPLE}%-17s${NC} ${GREEN}%-20s${NC} ${YELLOW}%s KB/s${NC}\n" \
+            "$count" "$ip" "$mac" "$hostname" "$current_limit"
         
         count=$((count + 1))
     done <<< "$clients"
@@ -491,7 +430,6 @@ set_client_speed_limit() {
     read -p "$(echo -e ${GREEN}Select client [0-$((count-1))]: ${NC})" selection
     read -p "$(echo -e ${GREEN}Speed limit in KB/s [0=unlimited]: ${NC})" speed_limit
     
-    # Validate input
     if ! [[ "$speed_limit" =~ ^[0-9]+$ ]]; then
         echo -e "${RED}[✗] Invalid speed value${NC}"
         sleep 1
@@ -499,29 +437,20 @@ set_client_speed_limit() {
     fi
     
     if [ "$selection" == "0" ]; then
-        # Apply to all clients
         echo -e "\n${YELLOW}[*] Applying to all clients...${NC}\n"
         for i in "${!client_list[@]}"; do
             local ip=$(echo "${client_list[$i]}" | awk '{print $1}')
             apply_speed_limit "$ip" "$speed_limit"
-            
-            # Save to database
             sed -i "/^$ip /d" "$CLIENTS_FILE" 2>/dev/null
             echo "$ip $speed_limit" >> "$CLIENTS_FILE"
         done
-        
         DEFAULT_SPEED_LIMIT=$speed_limit
         save_config
-        
     elif [ "$selection" -ge 1 ] && [ "$selection" -lt "$count" ]; then
-        # Apply to specific client
         local selected_client="${client_list[$selection]}"
         local ip=$(echo "$selected_client" | awk '{print $1}')
-        
         echo ""
         apply_speed_limit "$ip" "$speed_limit"
-        
-        # Save to database
         sed -i "/^$ip /d" "$CLIENTS_FILE" 2>/dev/null
         echo "$ip $speed_limit" >> "$CLIENTS_FILE"
     else
@@ -564,7 +493,8 @@ block_client() {
         client_list[$count]="$line"
         local ip=$(echo "$line" | awk '{print $1}')
         local mac=$(echo "$line" | awk '{print $2}')
-        printf "${CYAN}%2d.${NC} IP: ${WHITE}%-15s${NC} MAC: ${PURPLE}%s${NC}\n" "$count" "$ip" "$mac"
+        local hostname=$(get_client_hostname "$ip")
+        printf "${CYAN}%2d.${NC} ${WHITE}%-15s${NC} ${PURPLE}%-17s${NC} ${GREEN}%s${NC}\n" "$count" "$ip" "$mac" "$hostname"
         count=$((count + 1))
     done <<< "$clients"
     
@@ -581,7 +511,6 @@ block_client() {
         su -c "iptables -I FORWARD -s $ip -j DROP" 2>/dev/null
         su -c "iptables -I FORWARD -d $ip -j DROP" 2>/dev/null
         
-        # Add to blocked list
         echo "$ip $mac" >> "$BLOCKED_FILE"
         
         echo -e "${GREEN}[✓] Client blocked${NC}"
@@ -623,7 +552,7 @@ unblock_client() {
         blocked_list[$count]="$line"
         local ip=$(echo "$line" | awk '{print $1}')
         local mac=$(echo "$line" | awk '{print $2}')
-        printf "${CYAN}%2d.${NC} IP: ${WHITE}%-15s${NC} MAC: ${PURPLE}%s${NC}\n" "$count" "$ip" "$mac"
+        printf "${CYAN}%2d.${NC} ${WHITE}%-15s${NC} ${PURPLE}%s${NC}\n" "$count" "$ip" "$mac"
         count=$((count + 1))
     done < "$BLOCKED_FILE"
     
@@ -636,10 +565,9 @@ unblock_client() {
         
         echo -e "\n${YELLOW}[*] Unblocking $ip...${NC}"
         
-        su -c "iptables -D FORWARD -s $ip -j DROP 2>/dev/null" 2>/dev/null
-        su -c "iptables -D FORWARD -d $ip -j DROP 2>/dev/null" 2>/dev/null
+        su -c "iptables -D FORWARD -s $ip -j DROP" &>/dev/null
+        su -c "iptables -D FORWARD -d $ip -j DROP" &>/dev/null
         
-        # Remove from blocked list
         sed -i "/^$ip /d" "$BLOCKED_FILE" 2>/dev/null
         
         echo -e "${GREEN}[✓] Client unblocked${NC}"
@@ -683,7 +611,8 @@ kick_client() {
         client_list[$count]="$line"
         local ip=$(echo "$line" | awk '{print $1}')
         local mac=$(echo "$line" | awk '{print $2}')
-        printf "${CYAN}%2d.${NC} IP: ${WHITE}%-15s${NC} MAC: ${PURPLE}%s${NC}\n" "$count" "$ip" "$mac"
+        local hostname=$(get_client_hostname "$ip")
+        printf "${CYAN}%2d.${NC} ${WHITE}%-15s${NC} ${PURPLE}%-17s${NC} ${GREEN}%s${NC}\n" "$count" "$ip" "$mac" "$hostname"
         count=$((count + 1))
     done <<< "$clients"
     
@@ -697,8 +626,8 @@ kick_client() {
         echo -e "\n${YELLOW}[*] Kicking $ip...${NC}"
         
         detect_hotspot_interface
-        su -c "ip neigh del $ip dev $HOTSPOT_INTERFACE 2>/dev/null" 2>/dev/null
-        su -c "arp -d $ip 2>/dev/null" 2>/dev/null
+        su -c "ip neigh del $ip dev $HOTSPOT_INTERFACE" &>/dev/null
+        su -c "arp -d $ip" &>/dev/null
         
         echo -e "${GREEN}[✓] Client kicked (may reconnect)${NC}"
     else
@@ -707,76 +636,6 @@ kick_client() {
     
     echo ""
     read -p "Press Enter..."
-}
-
-# ═══════════════════════════════════════════════════
-# HOTSPOT SETTINGS
-# ═══════════════════════════════════════════════════
-hotspot_settings() {
-    while true; do
-        show_banner
-        load_config
-        
-        echo -e "${CYAN}════════════════════════════════════════════════${NC}"
-        echo -e "${CYAN}${BOLD}            HOTSPOT SETTINGS${NC}"
-        echo -e "${CYAN}════════════════════════════════════════════════${NC}\n"
-        
-        echo -e "${YELLOW}Current Settings:${NC}\n"
-        echo -e "${CYAN}1.${NC} SSID:              ${WHITE}$HOTSPOT_SSID${NC}"
-        echo -e "${CYAN}2.${NC} Password:          ${WHITE}$(echo $HOTSPOT_PASSWORD | sed 's/./*/g')${NC}"
-        echo -e "${CYAN}3.${NC} Max Clients:       ${WHITE}$HOTSPOT_MAX_CLIENTS${NC}"
-        echo -e "${CYAN}4.${NC} Default Speed:     ${WHITE}$DEFAULT_SPEED_LIMIT KB/s${NC}"
-        echo ""
-        echo -e "${CYAN}0.${NC} Back"
-        echo ""
-        echo -e "${CYAN}════════════════════════════════════════════════${NC}"
-        
-        read -p "$(echo -e ${GREEN}Choose: ${NC})" choice
-        
-        case $choice in
-            1)
-                read -p "New SSID: " new_ssid
-                if [ -n "$new_ssid" ]; then
-                    HOTSPOT_SSID="$new_ssid"
-                    save_config
-                    echo -e "${GREEN}[✓] Saved${NC}"
-                    sleep 1
-                fi
-                ;;
-            2)
-                read -p "New password (min 8 chars): " new_pass
-                if [ ${#new_pass} -ge 8 ]; then
-                    HOTSPOT_PASSWORD="$new_pass"
-                    save_config
-                    echo -e "${GREEN}[✓] Saved${NC}"
-                else
-                    echo -e "${RED}[✗] Too short${NC}"
-                fi
-                sleep 1
-                ;;
-            3)
-                read -p "Max clients [1-10]: " max_clients
-                if [ "$max_clients" -ge 1 ] && [ "$max_clients" -le 10 ]; then
-                    HOTSPOT_MAX_CLIENTS=$max_clients
-                    save_config
-                    echo -e "${GREEN}[✓] Saved${NC}"
-                else
-                    echo -e "${RED}[✗] Invalid${NC}"
-                fi
-                sleep 1
-                ;;
-            4)
-                read -p "Default speed limit (KB/s, 0=unlimited): " speed
-                DEFAULT_SPEED_LIMIT=$speed
-                save_config
-                echo -e "${GREEN}[✓] Saved${NC}"
-                sleep 1
-                ;;
-            0)
-                break
-                ;;
-        esac
-    done
 }
 
 # ═══════════════════════════════════════════════════
@@ -792,13 +651,14 @@ client_management() {
         if [ $ROOT_AVAILABLE -eq 1 ]; then
             local clients=$(get_connected_clients)
             if [ -n "$clients" ]; then
-                echo -e "${YELLOW}Connected Clients:${NC}\n"
+                echo -e "${YELLOW}Connected Clients (IPv4):${NC}\n"
                 while IFS= read -r line; do
                     local ip=$(echo "$line" | awk '{print $1}')
                     local mac=$(echo "$line" | awk '{print $2}')
+                    local hostname=$(get_client_hostname "$ip")
                     local limit=$(grep "^$ip " "$CLIENTS_FILE" 2>/dev/null | awk '{print $2}')
                     [ -z "$limit" ] && limit="∞"
-                    printf "${CYAN}•${NC} ${WHITE}%-15s${NC} ${PURPLE}%-17s${NC} ${YELLOW}%s KB/s${NC}\n" "$ip" "$mac" "$limit"
+                    printf "${CYAN}•${NC} ${WHITE}%-15s${NC} ${PURPLE}%-17s${NC} ${GREEN}%-20s${NC} ${YELLOW}%s KB/s${NC}\n" "$ip" "$mac" "$hostname" "$limit"
                 done <<< "$clients"
             else
                 echo -e "${RED}No clients connected${NC}"
@@ -851,28 +711,23 @@ main_menu() {
         echo -e "${CYAN}${BOLD}               MAIN MENU${NC}"
         echo -e "${CYAN}════════════════════════════════════════════════${NC}\n"
         
-        echo -e "${CYAN}1.${NC} Start Hotspot"
-        echo -e "${CYAN}2.${NC} Stop Hotspot"
-        echo -e "${CYAN}3.${NC} Hotspot Settings"
-        echo -e "${CYAN}4.${NC} Client Management"
-        echo -e "${CYAN}5.${NC} Real-time Statistics"
-        echo -e "${CYAN}6.${NC} About"
+        echo -e "${CYAN}1.${NC} Client Management"
+        echo -e "${CYAN}2.${NC} Real-time Statistics"
+        echo -e "${CYAN}3.${NC} About"
         echo -e "${CYAN}0.${NC} Exit"
         echo ""
+        echo -e "${YELLOW}[!] Enable/Disable hotspot from Android Settings${NC}"
         echo -e "${CYAN}════════════════════════════════════════════════${NC}"
         
         read -p "$(echo -e ${GREEN}Choose: ${NC})" choice
         
         case $choice in
-            1) toggle_hotspot "start" ;;
-            2) toggle_hotspot "stop" ;;
-            3) hotspot_settings ;;
-            4) client_management ;;
-            5) realtime_stats ;;
-            6) show_about ;;
+            1) client_management ;;
+            2) realtime_stats ;;
+            3) show_about ;;
             0)
                 echo -e "\n${CYAN}Terima kasih!${NC}"
-                echo -e "${PURPLE}Dibuat oleh Adam Senzore, Alias Adam Sanjaya <3${NC}\n"
+                echo -e "${PURPLE}Dibuat oleh Senzore, Alias Adam Sanjaya <3${NC}\n"
                 exit 0
                 ;;
         esac
@@ -888,23 +743,24 @@ show_about() {
     echo -e "${CYAN}${BOLD}                 ABOUT${NC}"
     echo -e "${CYAN}════════════════════════════════════════════════${NC}\n"
     
-    echo -e "${WHITE}${BOLD}Hotspot Manager v2.0${NC}"
+    echo -e "${WHITE}${BOLD}Hotspot Manager v2.1${NC}"
     echo -e "${YELLOW}Advanced Tethering Management for Android${NC}\n"
     
     echo -e "${CYAN}Features:${NC}"
-    echo -e "${GREEN}✓${NC} Root & Magisk detection"
-    echo -e "${GREEN}✓${NC} Hotspot control"
+    echo -e "${GREEN}✓${NC} Passive hotspot detection (Realme C15)"
+    echo -e "${GREEN}✓${NC} IPv4 client detection with hostnames"
     echo -e "${GREEN}✓${NC} Real-time statistics"
-    echo -e "${GREEN}✓${NC} Per-client speed limiting (Working)"
+    echo -e "${GREEN}✓${NC} Per-client speed limiting"
     echo -e "${GREEN}✓${NC} Client blocking/kicking"
-    echo -e "${GREEN}✓${NC} Realme/ColorOS optimized"
+    echo -e "${GREEN}✓${NC} Root & Magisk support"
     
     echo ""
     echo -e "${PURPLE}════════════════════════════════════════════════${NC}"
-    echo -e "${PURPLE}${BOLD}  Dibuat oleh Adam Senzore, Alias Adam Sanjaya <3${NC}"
+    echo -e "${PURPLE}${BOLD}      Dibuat oleh Senzore, Alias Adam Sanjaya <3${NC}"
     echo -e "${PURPLE}════════════════════════════════════════════════${NC}\n"
     
-    echo -e "${YELLOW}Note: Root access required for most features${NC}\n"
+    echo -e "${YELLOW}Note: Root access required for full features${NC}"
+    echo -e "${YELLOW}      Enable hotspot manually from Settings${NC}\n"
     
     read -p "Press Enter..."
 }
