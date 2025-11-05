@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
 # ═══════════════════════════════════════════════════
-# 4G HOTSPOT SPEED MANAGER v3.0 - MOBILE OPTIMIZED
+# 4G HOTSPOT SPEED MANAGER v4.0 - FIXED DETECTION
 # By: senzore ganteng
 # Save as: ./4g.sh
 # ═══════════════════════════════════════════════════
@@ -24,33 +24,56 @@ touch "$SPEED_DB" "$BLOCK_DB" 2>/dev/null
 header() {
     clear
     echo -e "${C}================================${N}"
-    echo -e "${W}    4G SPEED MANAGER v3.0${N}"
+    echo -e "${W}    4G SPEED MANAGER v4.0${N}"
     echo -e "${C}================================${N}\n"
 }
 
 # ═══════════════════════════════════════════════════
-# GET INTERFACE - SIMPLIFIED
+# GET INTERFACE - FROM WORKING VERSION
 # ═══════════════════════════════════════════════════
 get_iface() {
-    # Try common hotspot interfaces
-    for i in ap0 swlan0 wlan0; do
-        if su -c "ip link show $i 2>/dev/null | grep -q UP"; then
-            echo "$i"
+    # Check for active hotspot interface
+    for iface in ap0 swlan0 wlan0 wlan1 rmnet_data0 rmnet_data1 rndis0; do
+        local ip=$(su -c "ip addr show $iface 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | awk '{print \$2}' | cut -d/ -f1")
+        if [ -n "$ip" ]; then
+            echo "$iface"
             return
         fi
     done
+    
+    # Fallback
     echo "wlan0"
 }
 
 # ═══════════════════════════════════════════════════
-# GET CLIENTS - SIMPLIFIED
+# GET CLIENTS - EXACT WORKING METHOD FROM BEFORE
 # ═══════════════════════════════════════════════════
 get_clients() {
-    su -c "arp -n 2>/dev/null | grep -v incomplete | tail -n +2 | awk '{print \$1}' | grep -E '^[0-9]+\.'" 2>/dev/null
+    local all_ips=""
+    local iface=$(get_iface)
+    
+    # Method 1: From /proc/net/arp (MOST RELIABLE)
+    local arp_ips=$(su -c "cat /proc/net/arp 2>/dev/null" | grep "$iface" | grep -v "00:00:00:00:00:00" | awk '{print $1}' | grep -E '^[0-9]+\.')
+    all_ips="$all_ips $arp_ips"
+    
+    # Method 2: From ip neigh
+    local neigh_ips=$(su -c "ip neigh show 2>/dev/null" | grep -E "REACHABLE|STALE|DELAY" | awk '{print $1}' | grep -E '^[0-9]+\.')
+    all_ips="$all_ips $neigh_ips"
+    
+    # Method 3: From arp command
+    local arp_cmd=$(su -c "arp -n 2>/dev/null" | grep -v incomplete | tail -n +2 | awk '{print $1}' | grep -E '^[0-9]+\.')
+    all_ips="$all_ips $arp_cmd"
+    
+    # Method 4: DHCP leases
+    local dhcp_ips=$(su -c "cat /data/misc/dhcp/dnsmasq.leases 2>/dev/null | awk '{print \$3}'")
+    all_ips="$all_ips $dhcp_ips"
+    
+    # Remove duplicates and sort
+    echo "$all_ips" | tr ' ' '\n' | grep -E '^[0-9]+\.' | sort -u | grep -v '^$'
 }
 
 # ═══════════════════════════════════════════════════
-# APPLY SPEED - WORKING METHOD
+# APPLY SPEED - WORKING TC METHOD
 # ═══════════════════════════════════════════════════
 set_speed() {
     local ip=$1
@@ -59,22 +82,28 @@ set_speed() {
     
     echo -e "${Y}Setting $ip to ${speed}KB/s...${N}"
     
-    # Clear old rules
-    su -c "iptables -D FORWARD -s $ip -j ACCEPT" 2>/dev/null
-    su -c "iptables -D FORWARD -d $ip -j ACCEPT" 2>/dev/null
-    
     if [ "$speed" = "0" ]; then
         # Remove limit
+        su -c "tc filter del dev $iface protocol ip parent 1:0 prio 1 2>/dev/null"
         sed -i "/^$ip /d" "$SPEED_DB" 2>/dev/null
         echo -e "${G}Limit removed${N}"
         return
     fi
     
-    # Method 1: Simple iptables rate limiting
-    su -c "iptables -I FORWARD -s $ip -m limit --limit ${speed}/s --limit-burst $((speed*2)) -j ACCEPT"
-    su -c "iptables -I FORWARD -d $ip -m limit --limit ${speed}/s --limit-burst $((speed*2)) -j ACCEPT"
-    su -c "iptables -A FORWARD -s $ip -j DROP"
-    su -c "iptables -A FORWARD -d $ip -j DROP"
+    # Setup TC root if not exists
+    su -c "tc qdisc show dev $iface | grep -q htb" || {
+        su -c "tc qdisc add dev $iface root handle 1: htb default 30"
+        su -c "tc class add dev $iface parent 1: classid 1:1 htb rate 100mbit"
+        su -c "tc class add dev $iface parent 1: classid 1:30 htb rate 100mbit"
+    }
+    
+    # Apply limit
+    local rate=$((speed * 8))  # KB/s to kbit
+    local burst=$((speed * 2))
+    local class_id="1:$(echo $ip | cut -d. -f4)"
+    
+    su -c "tc class add dev $iface parent 1:1 classid $class_id htb rate ${rate}kbit burst ${burst}k"
+    su -c "tc filter add dev $iface protocol ip parent 1:0 prio 1 u32 match ip dst $ip flowid $class_id"
     
     # Save to DB
     sed -i "/^$ip /d" "$SPEED_DB" 2>/dev/null
@@ -84,18 +113,23 @@ set_speed() {
 }
 
 # ═══════════════════════════════════════════════════
-# SHOW CLIENTS - NO ASCII BOXES
+# SHOW CLIENTS - SIMPLE NO BOXES
 # ═══════════════════════════════════════════════════
 show_clients() {
-    echo -e "${Y}Connected Devices:${N}"
-    echo -e "${C}----------------${N}"
+    echo -e "${Y}Scanning for devices...${N}"
     
     local clients=$(get_clients)
     
     if [ -z "$clients" ]; then
         echo -e "${R}No devices found${N}"
+        echo -e "${Y}Make sure:${N}"
+        echo "1. Hotspot is ON"
+        echo "2. Devices are connected"
         return 1
     fi
+    
+    echo -e "\n${C}Connected Devices:${N}"
+    echo "------------------------"
     
     local n=1
     echo "$clients" > /tmp/.clients
@@ -106,16 +140,17 @@ show_clients() {
         local speed=$(grep "^$ip " "$SPEED_DB" 2>/dev/null | cut -d' ' -f2)
         [ -z "$speed" ] && speed="Unlimited" || speed="${speed}KB/s"
         
-        echo -e "${W}$n.${N} $ip [$speed]"
+        printf "${W}%2d.${N} %-15s [${Y}%s${N}]\n" "$n" "$ip" "$speed"
         ((n++))
     done <<< "$clients"
     
-    echo -e "${C}----------------${N}"
+    echo "------------------------"
+    echo -e "${G}Total: $((n-1)) devices${N}"
     return 0
 }
 
 # ═══════════════════════════════════════════════════
-# SPEED CONTROL - SIMPLIFIED
+# SPEED CONTROL MENU
 # ═══════════════════════════════════════════════════
 speed_menu() {
     header
@@ -123,17 +158,17 @@ speed_menu() {
     
     show_clients || { sleep 2; return; }
     
-    echo -e "\n${G}0${N} = ALL devices"
+    echo -e "\n${G}0${N}  = Apply to ALL devices"
     echo -e "${R}99${N} = Remove ALL limits"
     
-    read -p "Select device: " dev
+    read -p $'\n'"Select device: " dev
     
     if [ "$dev" = "99" ]; then
         echo -e "\n${Y}Removing all limits...${N}"
         
-        # Clear all forward rules
-        su -c "iptables -F FORWARD" 2>/dev/null
-        su -c "iptables -P FORWARD ACCEPT" 2>/dev/null
+        local iface=$(get_iface)
+        su -c "tc qdisc del dev $iface root" 2>/dev/null
+        su -c "tc qdisc del dev $iface ingress" 2>/dev/null
         
         > "$SPEED_DB"
         
@@ -143,15 +178,15 @@ speed_menu() {
     fi
     
     echo -e "\n${C}Speed Options:${N}"
-    echo -e "1. 25 KB/s"
-    echo -e "2. 50 KB/s"
-    echo -e "3. 100 KB/s"
-    echo -e "4. 200 KB/s"
-    echo -e "5. 500 KB/s"
-    echo -e "6. Custom"
-    echo -e "7. Unlimited"
+    echo "1. 25 KB/s  (Very Slow)"
+    echo "2. 50 KB/s  (Slow)"
+    echo "3. 100 KB/s (Limited)"
+    echo "4. 200 KB/s (Medium)"
+    echo "5. 500 KB/s (Fast)"
+    echo "6. Custom speed"
+    echo "7. Remove limit"
     
-    read -p "Choose: " opt
+    read -p $'\n'"Choose: " opt
     
     local speed=0
     case $opt in
@@ -160,13 +195,21 @@ speed_menu() {
         3) speed=100 ;;
         4) speed=200 ;;
         5) speed=500 ;;
-        6) read -p "Enter KB/s: " speed ;;
+        6) 
+            read -p "Enter KB/s: " speed
+            if ! [[ "$speed" =~ ^[0-9]+$ ]]; then
+                echo -e "${R}Invalid speed${N}"
+                sleep 2
+                return
+            fi
+            ;;
         7) speed=0 ;;
         *) echo -e "${R}Invalid${N}"; sleep 1; return ;;
     esac
     
     if [ "$dev" = "0" ]; then
-        # All devices
+        # Apply to all devices
+        echo -e "\n${Y}Applying to ALL devices...${N}\n"
         local clients=$(get_clients)
         while read ip; do
             [ -z "$ip" ] && continue
@@ -186,7 +229,7 @@ speed_menu() {
 }
 
 # ═══════════════════════════════════════════════════
-# BLOCK DEVICE - SIMPLE
+# BLOCK DEVICE
 # ═══════════════════════════════════════════════════
 block_menu() {
     header
@@ -194,7 +237,7 @@ block_menu() {
     
     show_clients || { sleep 2; return; }
     
-    read -p "Block which device: " dev
+    read -p $'\n'"Block which device: " dev
     
     local ip=$(sed -n "${dev}p" /tmp/.clients 2>/dev/null)
     
@@ -203,11 +246,12 @@ block_menu() {
         
         su -c "iptables -I INPUT -s $ip -j DROP"
         su -c "iptables -I FORWARD -s $ip -j DROP"
+        su -c "iptables -I FORWARD -d $ip -j DROP"
         
         echo "$ip" >> "$BLOCK_DB"
-        echo -e "${G}Blocked${N}"
+        echo -e "${G}Device blocked${N}"
     else
-        echo -e "${R}Invalid${N}"
+        echo -e "${R}Invalid selection${N}"
     fi
     
     sleep 2
@@ -227,18 +271,18 @@ unblock_menu() {
     fi
     
     echo -e "${Y}Blocked Devices:${N}"
-    echo -e "${C}----------------${N}"
+    echo "------------------------"
     
     local n=1
     while read ip; do
         [ -z "$ip" ] && continue
-        echo -e "${W}$n.${N} $ip"
+        printf "${W}%2d.${N} %s\n" "$n" "$ip"
         ((n++))
     done < "$BLOCK_DB"
     
-    echo -e "${C}----------------${N}"
+    echo "------------------------"
     
-    read -p "Unblock which: " dev
+    read -p $'\n'"Unblock which: " dev
     
     local ip=$(sed -n "${dev}p" "$BLOCK_DB" 2>/dev/null)
     
@@ -247,41 +291,43 @@ unblock_menu() {
         
         su -c "iptables -D INPUT -s $ip -j DROP" 2>/dev/null
         su -c "iptables -D FORWARD -s $ip -j DROP" 2>/dev/null
+        su -c "iptables -D FORWARD -d $ip -j DROP" 2>/dev/null
         
         sed -i "/^$ip$/d" "$BLOCK_DB"
-        echo -e "${G}Unblocked${N}"
+        echo -e "${G}Device unblocked${N}"
     else
-        echo -e "${R}Invalid${N}"
+        echo -e "${R}Invalid selection${N}"
     fi
     
     sleep 2
 }
 
 # ═══════════════════════════════════════════════════
-# VIEW STATUS - SIMPLE
+# VIEW STATUS
 # ═══════════════════════════════════════════════════
 view_status() {
     header
-    echo -e "${C}STATUS${N}\n"
+    echo -e "${C}SYSTEM STATUS${N}\n"
     
     local iface=$(get_iface)
-    local clients=$(get_clients | wc -l)
+    local clients_count=$(get_clients | wc -l)
     local limited=$(cat "$SPEED_DB" 2>/dev/null | wc -l)
     local blocked=$(cat "$BLOCK_DB" 2>/dev/null | wc -l)
     
-    echo -e "Interface: ${G}$iface${N}"
-    echo -e "Connected: ${G}$clients devices${N}"
-    echo -e "Limited: ${Y}$limited devices${N}"
-    echo -e "Blocked: ${R}$blocked devices${N}"
-    echo -e "TTL: ${G}$(cat /proc/sys/net/ipv4/ip_default_ttl)${N}"
+    echo "Interface: ${G}$iface${N}"
+    echo "Connected: ${G}$clients_count devices${N}"
+    echo "Limited: ${Y}$limited devices${N}"
+    echo "Blocked: ${R}$blocked devices${N}"
+    echo "TTL: ${G}$(cat /proc/sys/net/ipv4/ip_default_ttl)${N}"
     
     if [ -s "$SPEED_DB" ]; then
         echo -e "\n${C}Speed Limits:${N}"
+        echo "------------------------"
         while read line; do
             [ -z "$line" ] && continue
             local ip=$(echo $line | cut -d' ' -f1)
             local speed=$(echo $line | cut -d' ' -f2)
-            echo "  $ip = ${speed}KB/s"
+            echo "$ip = ${speed}KB/s"
         done < "$SPEED_DB"
     fi
     
@@ -289,24 +335,24 @@ view_status() {
 }
 
 # ═══════════════════════════════════════════════════
-# MONITOR - SIMPLE
+# MONITOR
 # ═══════════════════════════════════════════════════
 monitor() {
     header
     echo -e "${C}BANDWIDTH MONITOR${N}\n"
     
     local iface=$(get_iface)
-    echo -e "Interface: $iface"
+    echo "Interface: $iface"
     echo -e "${Y}Press Ctrl+C to stop${N}\n"
     
     while true; do
-        local rx1=$(cat /sys/class/net/$iface/statistics/rx_bytes 2>/dev/null)
-        local tx1=$(cat /sys/class/net/$iface/statistics/tx_bytes 2>/dev/null)
+        local rx1=$(cat /sys/class/net/$iface/statistics/rx_bytes 2>/dev/null || echo 0)
+        local tx1=$(cat /sys/class/net/$iface/statistics/tx_bytes 2>/dev/null || echo 0)
         
         sleep 1
         
-        local rx2=$(cat /sys/class/net/$iface/statistics/rx_bytes 2>/dev/null)
-        local tx2=$(cat /sys/class/net/$iface/statistics/tx_bytes 2>/dev/null)
+        local rx2=$(cat /sys/class/net/$iface/statistics/rx_bytes 2>/dev/null || echo 0)
+        local tx2=$(cat /sys/class/net/$iface/statistics/tx_bytes 2>/dev/null || echo 0)
         
         local rx_rate=$(( (rx2 - rx1) / 1024 ))
         local tx_rate=$(( (tx2 - tx1) / 1024 ))
@@ -316,13 +362,19 @@ monitor() {
 }
 
 # ═══════════════════════════════════════════════════
-# FIX EVERYTHING
+# RESET ALL
 # ═══════════════════════════════════════════════════
-fix_all() {
+reset_all() {
     header
-    echo -e "${C}FIX ALL${N}\n"
+    echo -e "${C}RESET ALL${N}\n"
     
     echo -e "${Y}Resetting everything...${N}"
+    
+    local iface=$(get_iface)
+    
+    # Clear TC
+    su -c "tc qdisc del dev $iface root" 2>/dev/null
+    su -c "tc qdisc del dev $iface ingress" 2>/dev/null
     
     # Clear iptables
     su -c "iptables -F" 2>/dev/null
@@ -337,26 +389,30 @@ fix_all() {
     > "$SPEED_DB"
     > "$BLOCK_DB"
     
-    echo -e "${G}Fixed!${N}"
+    echo -e "${G}Everything reset!${N}"
     sleep 2
 }
 
 # ═══════════════════════════════════════════════════
-# MAIN MENU - SIMPLE
+# MAIN MENU
 # ═══════════════════════════════════════════════════
 menu() {
     while true; do
         header
         
-        local clients=$(get_clients | wc -l)
-        echo -e "Connected: ${G}$clients${N} devices\n"
+        local clients_count=$(get_clients | wc -l)
+        echo "Connected: ${G}$clients_count${N} devices"
         
+        local limited=$(cat "$SPEED_DB" 2>/dev/null | wc -l)
+        [ $limited -gt 0 ] && echo "Limited: ${Y}$limited${N} devices"
+        
+        echo ""
         echo "1. Speed Control"
         echo "2. Block Device"
         echo "3. Unblock Device"
         echo "4. View Status"
-        echo "5. Monitor"
-        echo "6. Fix All"
+        echo "5. Monitor Speed"
+        echo "6. Reset All"
         echo "0. Exit"
         
         read -p $'\nChoice: ' opt
@@ -367,7 +423,7 @@ menu() {
             3) unblock_menu ;;
             4) view_status ;;
             5) monitor ;;
-            6) fix_all ;;
+            6) reset_all ;;
             0) 
                 echo -e "\n${C}By: senzore ganteng${N}\n"
                 exit 0
@@ -377,7 +433,7 @@ menu() {
 }
 
 # ═══════════════════════════════════════════════════
-# START
+# MAIN START
 # ═══════════════════════════════════════════════════
 main() {
     header
@@ -385,11 +441,13 @@ main() {
     echo -e "${Y}Checking root...${N}"
     
     if ! su -c "id" &>/dev/null; then
-        echo -e "${R}Root required!${N}"
+        echo -e "${R}Root access required!${N}"
+        echo -e "${Y}Please grant root permission${N}"
         exit 1
     fi
     
     echo -e "${G}Root OK${N}"
+    echo -e "${G}TTL: $(cat /proc/sys/net/ipv4/ip_default_ttl)${N}"
     echo -e "${G}Ready!${N}\n"
     
     sleep 1
