@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
 # ═══════════════════════════════════════════════════
-# HOTSPOT MANAGER v11.0 - FAST & FIXED
+# HOTSPOT MANAGER v12.0 - SIMPLE & WORKING
 # By: senzore ganteng
 # ═══════════════════════════════════════════════════
 
@@ -10,19 +10,16 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
-WHITE='\033[1;37m'
 NC='\033[0m'
-BOLD='\033[1m'
 
 # Config
 CONFIG_DIR="$HOME/.hotspot_manager"
 SPEED_DB="$CONFIG_DIR/speed.db"
-BLOCK_DB="$CONFIG_DIR/blocked.db"
+BLOCK_DB="$CONFIG_DIR/block.db"
 
-# Vars
+# Variables
 ROOT=0
-IFACE=""
-IP=""
+INTERFACE="wlan0"
 
 # ═══════════════════════════════════════════════════
 # BANNER
@@ -30,26 +27,30 @@ IP=""
 banner() {
     clear
     echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
-    echo -e "${WHITE}${BOLD}      HOTSPOT MANAGER v11.0 FAST${NC}"
-    echo -e "${CYAN}           By: senzore ganteng${NC}"
+    echo -e "${CYAN}        HOTSPOT MANAGER v12.0${NC}"
+    echo -e "${CYAN}         By: senzore ganteng${NC}"
     echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
 }
 
 # ═══════════════════════════════════════════════════
-# QUICK ROOT CHECK
+# CHECK ROOT
 # ═══════════════════════════════════════════════════
 check_root() {
     if su -c "id" 2>/dev/null | grep -q "uid=0"; then
         ROOT=1
-        echo -e "${GREEN}[✓] Root OK${NC}"
+        echo -e "${GREEN}[✓] Root Access OK${NC}"
         
-        # Enable IP forward
+        # Set TTL to 65
+        su -c "iptables -t mangle -A POSTROUTING -j TTL --ttl-set 65" 2>/dev/null
+        su -c "echo 65 > /proc/sys/net/ipv4/ip_default_ttl" 2>/dev/null
+        
+        # Enable forwarding
         su -c "echo 1 > /proc/sys/net/ipv4/ip_forward" 2>/dev/null
-        su -c "sysctl -w net.ipv4.ip_forward=1" &>/dev/null
     else
-        echo -e "${RED}[✗] No Root${NC}"
-        echo -e "${YELLOW}Speed control needs root!${NC}"
+        echo -e "${RED}[✗] No Root Access${NC}"
+        echo -e "${YELLOW}This app needs root!${NC}"
         sleep 2
+        exit 1
     fi
 }
 
@@ -57,175 +58,175 @@ check_root() {
 # FIND INTERFACE
 # ═══════════════════════════════════════════════════
 find_interface() {
-    [ $ROOT -eq 0 ] && IFACE="wlan0" && return
-    
-    # Find active hotspot interface
-    for i in ap0 swlan0 wlan0 wlan1 rmnet_data1 rndis0; do
-        local test_ip=$(su -c "ip addr show $i 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | awk '{print \$2}' | cut -d/ -f1")
-        if [ -n "$test_ip" ]; then
-            IFACE="$i"
-            IP="$test_ip"
+    # Try to find active hotspot interface
+    for iface in ap0 swlan0 wlan0; do
+        if su -c "ip link show $iface" 2>/dev/null | grep -q "state UP"; then
+            INTERFACE="$iface"
             return
         fi
     done
-    IFACE="wlan0"
 }
 
 # ═══════════════════════════════════════════════════
-# GET CLIENTS
+# GET CONNECTED CLIENTS
 # ═══════════════════════════════════════════════════
 get_clients() {
-    [ $ROOT -eq 0 ] && return
     find_interface
-    su -c "cat /proc/net/arp 2>/dev/null | grep '$IFACE' | grep -v '00:00:00:00:00:00' | awk '{print \$1}'"
+    su -c "arp -n 2>/dev/null | grep -v incomplete | grep $INTERFACE | awk '{print \$1}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'"
 }
 
 # ═══════════════════════════════════════════════════
-# SHOW CLIENTS
+# LIST CLIENTS
 # ═══════════════════════════════════════════════════
-show_clients() {
+list_clients() {
     echo -e "${YELLOW}Connected Devices:${NC}\n"
     
     local clients=$(get_clients)
-    [ -z "$clients" ] && echo -e "${RED}No devices${NC}" && return 1
+    if [ -z "$clients" ]; then
+        echo -e "${RED}No devices connected${NC}"
+        return 1
+    fi
     
-    local n=1
+    local num=1
     while read ip; do
         [ -z "$ip" ] && continue
-        local speed=$(grep "^$ip " "$SPEED_DB" 2>/dev/null | cut -d' ' -f2)
-        [ -z "$speed" ] || [ "$speed" = "0" ] && speed="Unlimited" || speed="${speed}KB/s"
-        printf "${CYAN}%2d.${NC} %-15s [${YELLOW}%s${NC}]\n" "$n" "$ip" "$speed"
-        ((n++))
+        
+        # Check if has speed limit
+        local limit=""
+        if grep -q "^$ip$" "$SPEED_DB" 2>/dev/null; then
+            limit="${YELLOW}[LIMITED]${NC}"
+        fi
+        
+        # Check if blocked
+        local blocked=""
+        if grep -q "^$ip$" "$BLOCK_DB" 2>/dev/null; then
+            blocked="${RED}[BLOCKED]${NC}"
+        fi
+        
+        printf "${CYAN}%2d.${NC} %-15s %s %s\n" "$num" "$ip" "$limit" "$blocked"
+        ((num++))
     done <<< "$clients"
     
     return 0
 }
 
 # ═══════════════════════════════════════════════════
-# SPEED LIMITER - FIXED FOR ALL DEVICES
+# SPEED LIMIT (SIMPLE VERSION)
 # ═══════════════════════════════════════════════════
-apply_speed() {
-    local ip=$1
-    local speed=$2
-    
-    echo -e "${YELLOW}Setting $ip to ${speed}KB/s...${NC}"
-    
-    # Remove old rules
-    su -c "tc filter del dev $IFACE protocol ip parent 1: prio 1 handle 800::$ip u32 match ip dst $ip 2>/dev/null"
-    su -c "tc filter del dev $IFACE protocol ip parent ffff: prio 1 handle 800::$ip u32 match ip src $ip 2>/dev/null"
-    su -c "tc class del dev $IFACE parent 1:1 classid 1:$(echo $ip | cut -d. -f4) 2>/dev/null"
-    
-    if [ "$speed" = "0" ]; then
-        # Remove limit
-        sed -i "/^$ip /d" "$SPEED_DB" 2>/dev/null
-        echo -e "${GREEN}[✓] Limit removed${NC}"
-        return
-    fi
-    
-    # FIXED: Setup that works for ALL devices (mobile + PC)
-    
-    # 1. Setup root qdisc if not exists
-    su -c "tc qdisc show dev $IFACE | grep -q 'htb 1:'" || {
-        su -c "tc qdisc add dev $IFACE root handle 1: htb default 999"
-        su -c "tc class add dev $IFACE parent 1: classid 1:1 htb rate 1000mbit"
-        su -c "tc class add dev $IFACE parent 1:1 classid 1:999 htb rate 1000mbit"
-    }
-    
-    # 2. Setup ingress for upload control
-    su -c "tc qdisc show dev $IFACE | grep -q 'ingress'" || {
-        su -c "tc qdisc add dev $IFACE handle ffff: ingress"
-    }
-    
-    # 3. Create class for this IP
-    local classid="1:$(echo $ip | cut -d. -f4)"
-    local rate=$((speed * 8))  # Convert KB/s to kbit
-    
-    su -c "tc class add dev $IFACE parent 1:1 classid $classid htb rate ${rate}kbit ceil ${rate}kbit"
-    
-    # 4. Add SFQ for fairness
-    su -c "tc qdisc add dev $IFACE parent $classid handle $(echo $ip | cut -d. -f4): sfq perturb 10"
-    
-    # 5. IMPORTANT: Filter both directions for ALL traffic types
-    
-    # Download TO device (dst)
-    su -c "tc filter add dev $IFACE protocol ip parent 1: prio 1 u32 match ip dst $ip flowid $classid"
-    
-    # Upload FROM device (src) - using policing for ingress
-    su -c "tc filter add dev $IFACE parent ffff: protocol ip prio 1 u32 match ip src $ip police rate ${rate}kbit burst 10k drop flowid :1"
-    
-    # 6. Also use iptables marking for better control
-    su -c "iptables -t mangle -D FORWARD -d $ip -j MARK --set-mark $(echo $ip | cut -d. -f4) 2>/dev/null"
-    su -c "iptables -t mangle -A FORWARD -d $ip -j MARK --set-mark $(echo $ip | cut -d. -f4)"
-    su -c "tc filter add dev $IFACE parent 1: protocol ip prio 2 handle $(echo $ip | cut -d. -f4) fw flowid $classid"
-    
-    # 7. For WiFi clients specifically (helps with mobile)
-    su -c "iptables -t mangle -D PREROUTING -s $ip -j MARK --set-mark $(echo $ip | cut -d. -f4) 2>/dev/null"
-    su -c "iptables -t mangle -A PREROUTING -s $ip -j MARK --set-mark $(echo $ip | cut -d. -f4)"
-    
-    # Save to database
-    sed -i "/^$ip /d" "$SPEED_DB" 2>/dev/null
-    echo "$ip $speed" >> "$SPEED_DB"
-    
-    echo -e "${GREEN}[✓] Speed limit applied${NC}"
-}
-
-# ═══════════════════════════════════════════════════
-# SPEED CONTROL MENU
-# ═══════════════════════════════════════════════════
-speed_control() {
-    [ $ROOT -eq 0 ] && echo -e "${RED}Root required${NC}" && sleep 1 && return
-    
+limit_speed() {
     banner
-    echo -e "${CYAN}══════ SPEED CONTROL ══════${NC}\n"
+    echo -e "${CYAN}══════ SPEED LIMIT ══════${NC}\n"
     
-    show_clients || { sleep 1; return; }
+    list_clients || return
     
-    local clients=$(get_clients)
-    local -a list
-    local i=1
+    echo -e "\n${GREEN}Enter device number to limit${NC}"
+    echo -e "${YELLOW}Enter 0 to limit ALL devices${NC}"
+    echo -e "${RED}Enter 99 to REMOVE all limits${NC}"
     
-    while read ip; do
-        [ -z "$ip" ] && continue
-        list[$i]="$ip"
-        ((i++))
-    done <<< "$clients"
+    read -p $'\n'"Choice: " choice
     
-    echo -e "\n${CYAN}0.${NC} ALL devices"
-    echo -e "${CYAN}99.${NC} Remove ALL limits"
-    
-    read -p $'\n'"Select [0-$((i-1))]: " sel
-    
-    if [ "$sel" = "99" ]; then
-        echo -e "\n${YELLOW}Removing all limits...${NC}"
-        find_interface
+    # Remove all limits
+    if [ "$choice" = "99" ]; then
+        echo -e "\n${YELLOW}Removing all speed limits...${NC}"
         
-        # Clear everything
-        su -c "tc qdisc del dev $IFACE root 2>/dev/null"
-        su -c "tc qdisc del dev $IFACE ingress 2>/dev/null"
-        su -c "iptables -t mangle -F 2>/dev/null"
+        # Clear all tc rules
+        su -c "tc qdisc del dev $INTERFACE root" 2>/dev/null
+        
+        # Clear speed database
         > "$SPEED_DB"
         
         echo -e "${GREEN}[✓] All limits removed${NC}"
-        sleep 1
+        sleep 2
         return
     fi
     
-    read -p "Speed limit KB/s (0=unlimited): " speed
+    # Get target IP(s)
+    local target_ips=""
+    if [ "$choice" = "0" ]; then
+        target_ips=$(get_clients)
+        echo -e "\n${YELLOW}Limiting ALL devices...${NC}"
+    else
+        local clients=$(get_clients)
+        local num=1
+        while read ip; do
+            [ -z "$ip" ] && continue
+            if [ "$num" = "$choice" ]; then
+                target_ips="$ip"
+                echo -e "\n${YELLOW}Limiting $ip...${NC}"
+                break
+            fi
+            ((num++))
+        done <<< "$clients"
+    fi
     
-    [[ ! "$speed" =~ ^[0-9]+$ ]] && echo -e "${RED}Invalid${NC}" && sleep 1 && return
+    [ -z "$target_ips" ] && echo -e "${RED}Invalid selection${NC}" && sleep 2 && return
     
+    # Simple speed limit using wondershaper method
     find_interface
     
-    if [ "$sel" = "0" ]; then
-        # Apply to all
-        echo ""
-        for j in "${!list[@]}"; do
-            [ -z "${list[$j]}" ] && continue
-            apply_speed "${list[$j]}" "$speed"
-        done
-    elif [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
-        echo ""
-        apply_speed "${list[$sel]}" "$speed"
+    # Setup basic tc structure
+    su -c "tc qdisc del dev $INTERFACE root" 2>/dev/null
+    su -c "tc qdisc add dev $INTERFACE root handle 1: htb default 30"
+    su -c "tc class add dev $INTERFACE parent 1: classid 1:1 htb rate 100mbit"
+    su -c "tc class add dev $INTERFACE parent 1: classid 1:30 htb rate 100mbit"
+    
+    # Apply limit to each IP
+    local class_num=10
+    while read ip; do
+        [ -z "$ip" ] && continue
+        
+        # Create class with 50KB/s limit (400kbit)
+        su -c "tc class add dev $INTERFACE parent 1:1 classid 1:$class_num htb rate 400kbit"
+        
+        # Filter traffic to this IP
+        su -c "tc filter add dev $INTERFACE protocol ip parent 1:0 prio 1 u32 match ip dst $ip flowid 1:$class_num"
+        
+        # Save to database
+        echo "$ip" >> "$SPEED_DB"
+        
+        echo -e "${GREEN}[✓] Limited $ip to 50KB/s${NC}"
+        
+        ((class_num++))
+    done <<< "$target_ips"
+    
+    sleep 2
+}
+
+# ═══════════════════════════════════════════════════
+# BLOCK DEVICE
+# ═══════════════════════════════════════════════════
+block_device() {
+    banner
+    echo -e "${CYAN}══════ BLOCK DEVICE ══════${NC}\n"
+    
+    list_clients || return
+    
+    read -p $'\n'"Enter device number to block: " choice
+    
+    local clients=$(get_clients)
+    local num=1
+    local target_ip=""
+    
+    while read ip; do
+        [ -z "$ip" ] && continue
+        if [ "$num" = "$choice" ]; then
+            target_ip="$ip"
+            break
+        fi
+        ((num++))
+    done <<< "$clients"
+    
+    if [ -n "$target_ip" ]; then
+        echo -e "\n${YELLOW}Blocking $target_ip...${NC}"
+        
+        # Block with iptables
+        su -c "iptables -A INPUT -s $target_ip -j DROP"
+        su -c "iptables -A FORWARD -s $target_ip -j DROP"
+        
+        # Save to database
+        echo "$target_ip" >> "$BLOCK_DB"
+        
+        echo -e "${GREEN}[✓] Blocked $target_ip${NC}"
     else
         echo -e "${RED}Invalid selection${NC}"
     fi
@@ -234,295 +235,248 @@ speed_control() {
 }
 
 # ═══════════════════════════════════════════════════
-# BLOCK/UNBLOCK
+# UNBLOCK DEVICE
 # ═══════════════════════════════════════════════════
-block_device() {
-    [ $ROOT -eq 0 ] && echo -e "${RED}Root required${NC}" && sleep 1 && return
-    
-    banner
-    echo -e "${CYAN}══════ BLOCK DEVICE ══════${NC}\n"
-    
-    show_clients || { sleep 1; return; }
-    
-    local clients=$(get_clients)
-    local -a list
-    local i=1
-    
-    while read ip; do
-        [ -z "$ip" ] && continue
-        list[$i]="$ip"
-        ((i++))
-    done <<< "$clients"
-    
-    read -p $'\n'"Select [1-$((i-1))]: " sel
-    
-    if [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
-        local ip="${list[$sel]}"
-        echo -e "\n${YELLOW}Blocking $ip...${NC}"
-        
-        # Block with iptables
-        su -c "iptables -I INPUT -s $ip -j DROP"
-        su -c "iptables -I FORWARD -s $ip -j DROP"
-        su -c "iptables -I FORWARD -d $ip -j DROP"
-        
-        echo "$ip" >> "$BLOCK_DB"
-        echo -e "${GREEN}[✓] Blocked${NC}"
-    fi
-    
-    sleep 1
-}
-
 unblock_device() {
-    [ $ROOT -eq 0 ] && echo -e "${RED}Root required${NC}" && sleep 1 && return
-    
     banner
     echo -e "${CYAN}══════ UNBLOCK DEVICE ══════${NC}\n"
     
-    [ ! -s "$BLOCK_DB" ] && echo -e "${RED}No blocked devices${NC}" && sleep 1 && return
+    if [ ! -s "$BLOCK_DB" ]; then
+        echo -e "${RED}No blocked devices${NC}"
+        sleep 2
+        return
+    fi
     
-    echo -e "${YELLOW}Blocked:${NC}\n"
+    echo -e "${YELLOW}Blocked Devices:${NC}\n"
     
-    local i=1
-    local -a list
+    local num=1
+    while read ip; do
+        [ -z "$ip" ] && continue
+        printf "${CYAN}%2d.${NC} %s\n" "$num" "$ip"
+        ((num++))
+    done < "$BLOCK_DB"
+    
+    read -p $'\n'"Enter device number to unblock: " choice
+    
+    local num=1
+    local target_ip=""
     
     while read ip; do
         [ -z "$ip" ] && continue
-        list[$i]="$ip"
-        printf "${CYAN}%d.${NC} %s\n" $i "$ip"
-        ((i++))
+        if [ "$num" = "$choice" ]; then
+            target_ip="$ip"
+            break
+        fi
+        ((num++))
     done < "$BLOCK_DB"
     
-    read -p $'\n'"Select [1-$((i-1))]: " sel
-    
-    if [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
-        local ip="${list[$sel]}"
-        echo -e "\n${YELLOW}Unblocking $ip...${NC}"
+    if [ -n "$target_ip" ]; then
+        echo -e "\n${YELLOW}Unblocking $target_ip...${NC}"
         
-        su -c "iptables -D INPUT -s $ip -j DROP 2>/dev/null"
-        su -c "iptables -D FORWARD -s $ip -j DROP 2>/dev/null"
-        su -c "iptables -D FORWARD -d $ip -j DROP 2>/dev/null"
+        # Remove iptables rules
+        su -c "iptables -D INPUT -s $target_ip -j DROP" 2>/dev/null
+        su -c "iptables -D FORWARD -s $target_ip -j DROP" 2>/dev/null
         
-        sed -i "/^$ip$/d" "$BLOCK_DB"
-        echo -e "${GREEN}[✓] Unblocked${NC}"
+        # Remove from database
+        grep -v "^$target_ip$" "$BLOCK_DB" > "$BLOCK_DB.tmp"
+        mv "$BLOCK_DB.tmp" "$BLOCK_DB"
+        
+        echo -e "${GREEN}[✓] Unblocked $target_ip${NC}"
+    else
+        echo -e "${RED}Invalid selection${NC}"
     fi
     
-    sleep 1
+    sleep 2
 }
 
 # ═══════════════════════════════════════════════════
 # KICK DEVICE
 # ═══════════════════════════════════════════════════
 kick_device() {
-    [ $ROOT -eq 0 ] && echo -e "${RED}Root required${NC}" && sleep 1 && return
-    
     banner
     echo -e "${CYAN}══════ KICK DEVICE ══════${NC}\n"
     
-    show_clients || { sleep 1; return; }
+    list_clients || return
+    
+    read -p $'\n'"Enter device number to kick: " choice
     
     local clients=$(get_clients)
-    local -a list
-    local i=1
+    local num=1
+    local target_ip=""
     
     while read ip; do
         [ -z "$ip" ] && continue
-        list[$i]="$ip"
-        ((i++))
+        if [ "$num" = "$choice" ]; then
+            target_ip="$ip"
+            break
+        fi
+        ((num++))
     done <<< "$clients"
     
-    read -p $'\n'"Select [1-$((i-1))]: " sel
-    
-    if [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
-        find_interface
-        local ip="${list[$sel]}"
+    if [ -n "$target_ip" ]; then
+        echo -e "\n${YELLOW}Kicking $target_ip...${NC}"
         
-        echo -e "\n${YELLOW}Kicking $ip...${NC}"
-        su -c "ip neigh del $ip dev $IFACE 2>/dev/null"
-        su -c "arp -d $ip 2>/dev/null"
-        echo -e "${GREEN}[✓] Kicked${NC}"
+        find_interface
+        
+        # Remove from ARP table
+        su -c "arp -d $target_ip" 2>/dev/null
+        su -c "ip neigh del $target_ip dev $INTERFACE" 2>/dev/null
+        
+        # Temporarily block for 5 seconds
+        su -c "iptables -A INPUT -s $target_ip -j DROP"
+        su -c "iptables -A FORWARD -s $target_ip -j DROP"
+        
+        sleep 5
+        
+        # Unblock
+        su -c "iptables -D INPUT -s $target_ip -j DROP" 2>/dev/null
+        su -c "iptables -D FORWARD -s $target_ip -j DROP" 2>/dev/null
+        
+        echo -e "${GREEN}[✓] Kicked $target_ip${NC}"
+    else
+        echo -e "${RED}Invalid selection${NC}"
     fi
     
-    sleep 1
+    sleep 2
 }
 
 # ═══════════════════════════════════════════════════
-# MONITOR
+# SET TTL
 # ═══════════════════════════════════════════════════
-monitor() {
+set_ttl() {
     banner
-    echo -e "${CYAN}══════ MONITOR ══════${NC}\n"
+    echo -e "${CYAN}══════ TTL SETTINGS ══════${NC}\n"
     
-    find_interface
-    echo -e "${GREEN}Interface: $IFACE${NC}"
-    echo -e "${GREEN}IP: $IP${NC}"
-    echo -e "${YELLOW}Ctrl+C to exit${NC}\n"
+    echo -e "${YELLOW}Current TTL: $(cat /proc/sys/net/ipv4/ip_default_ttl 2>/dev/null || echo Unknown)${NC}\n"
     
-    local stats="/sys/class/net/$IFACE/statistics"
-    
-    [ ! -f "$stats/rx_bytes" ] && echo -e "${RED}Interface not active${NC}" && sleep 2 && return
-    
-    tput civis 2>/dev/null
-    trap 'tput cnorm 2>/dev/null; echo' EXIT INT
-    
-    local prev_rx=$(cat $stats/rx_bytes)
-    local prev_tx=$(cat $stats/tx_bytes)
-    
-    while true; do
-        sleep 1
-        
-        local rx=$(cat $stats/rx_bytes)
-        local tx=$(cat $stats/tx_bytes)
-        
-        local rx_rate=$(( (rx - prev_rx) / 1024 ))
-        local tx_rate=$(( (tx - prev_tx) / 1024 ))
-        
-        [ $rx_rate -lt 0 ] && rx_rate=0
-        [ $tx_rate -lt 0 ] && tx_rate=0
-        
-        tput cup 7 0
-        tput ed
-        
-        echo -e "${CYAN}Speed:${NC}"
-        echo -e "↓ ${rx_rate} KB/s"
-        echo -e "↑ ${tx_rate} KB/s"
-        echo -e "\n${CYAN}Total:${NC}"
-        echo -e "RX: $((rx/1048576)) MB"
-        echo -e "TX: $((tx/1048576)) MB"
-        
-        if [ $ROOT -eq 1 ]; then
-            echo -e "\n${CYAN}Devices:${NC}"
-            local clients=$(get_clients)
-            if [ -n "$clients" ]; then
-                while read ip; do
-                    [ -z "$ip" ] && continue
-                    local speed=$(grep "^$ip " "$SPEED_DB" 2>/dev/null | cut -d' ' -f2)
-                    [ -z "$speed" ] || [ "$speed" = "0" ] && speed="∞" || speed="${speed}KB/s"
-                    echo "$ip [$speed]"
-                done <<< "$clients"
-            else
-                echo "None"
-            fi
-        fi
-        
-        prev_rx=$rx
-        prev_tx=$tx
-    done
-}
-
-# ═══════════════════════════════════════════════════
-# MINECRAFT SERVER
-# ═══════════════════════════════════════════════════
-minecraft() {
-    banner
-    echo -e "${CYAN}══════ MINECRAFT SERVER ══════${NC}\n"
-    
-    find_interface
-    
-    echo -e "${GREEN}For friends in same room/WiFi:${NC}"
-    echo -e "Share this IP: ${CYAN}${IP}:25565${NC}\n"
-    
-    echo -e "${YELLOW}For online friends (bypass CGNAT):${NC}\n"
-    
-    echo -e "${CYAN}1.${NC} Playit.gg (Best for Asia)"
-    echo -e "${CYAN}2.${NC} ngrok (Global)"
+    echo -e "${CYAN}1.${NC} Set TTL to 65 (Bypass detection)"
+    echo -e "${CYAN}2.${NC} Set TTL to 64 (Default)"
+    echo -e "${CYAN}3.${NC} Custom TTL"
     echo -e "${CYAN}0.${NC} Back"
     
-    read -p $'\n'"Choose: " opt
+    read -p $'\n'"Choice: " choice
     
-    case $opt in
+    case $choice in
         1)
-            if [ ! -f "$HOME/playit" ]; then
-                echo -e "\n${YELLOW}Installing playit.gg...${NC}"
-                case $(uname -m) in
-                    aarch64|arm64) wget -O $HOME/playit "https://playit.gg/downloads/playit-linux-aarch64" -q --show-progress ;;
-                    arm*) wget -O $HOME/playit "https://playit.gg/downloads/playit-linux-arm7" -q --show-progress ;;
-                esac
-                chmod +x $HOME/playit
-            fi
-            
-            echo -e "\n${YELLOW}Starting...${NC}"
-            pkill -f playit 2>/dev/null
-            $HOME/playit &
-            
-            echo -e "\n${GREEN}Playit.gg started!${NC}"
-            echo -e "1. Check the link above"
-            echo -e "2. Login (FREE)"
-            echo -e "3. Choose Singapore region"
-            echo -e "4. Share address with friends!"
+            su -c "echo 65 > /proc/sys/net/ipv4/ip_default_ttl"
+            su -c "iptables -t mangle -F POSTROUTING"
+            su -c "iptables -t mangle -A POSTROUTING -j TTL --ttl-set 65"
+            echo -e "\n${GREEN}[✓] TTL set to 65${NC}"
             ;;
-            
         2)
-            if [ ! -f "$HOME/ngrok" ]; then
-                echo -e "\n${YELLOW}Installing ngrok...${NC}"
-                case $(uname -m) in
-                    aarch64|arm64) wget -O ng.tgz "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-arm64.tgz" -q --show-progress ;;
-                    arm*) wget -O ng.tgz "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-arm.tgz" -q --show-progress ;;
-                esac
-                tar -xzf ng.tgz -C $HOME && rm ng.tgz
-                chmod +x $HOME/ngrok
+            su -c "echo 64 > /proc/sys/net/ipv4/ip_default_ttl"
+            su -c "iptables -t mangle -F POSTROUTING"
+            echo -e "\n${GREEN}[✓] TTL set to 64${NC}"
+            ;;
+        3)
+            read -p "Enter TTL value (1-255): " ttl
+            if [[ "$ttl" =~ ^[0-9]+$ ]] && [ "$ttl" -ge 1 ] && [ "$ttl" -le 255 ]; then
+                su -c "echo $ttl > /proc/sys/net/ipv4/ip_default_ttl"
+                su -c "iptables -t mangle -F POSTROUTING"
+                su -c "iptables -t mangle -A POSTROUTING -j TTL --ttl-set $ttl"
+                echo -e "\n${GREEN}[✓] TTL set to $ttl${NC}"
+            else
+                echo -e "\n${RED}Invalid TTL value${NC}"
             fi
-            
-            if ! grep -q "authtoken:" $HOME/.ngrok2/ngrok.yml 2>/dev/null; then
-                echo -e "\nGet token from: ${CYAN}https://ngrok.com${NC}"
-                read -p "Token: " token
-                [ -n "$token" ] && $HOME/ngrok config add-authtoken "$token"
-            fi
-            
-            echo -e "\n${YELLOW}Starting...${NC}"
-            pkill -f ngrok 2>/dev/null
-            $HOME/ngrok tcp 25565 --region ap &
-            
-            sleep 3
-            echo -e "\n${GREEN}Check terminal for address!${NC}"
             ;;
     esac
     
-    read -p $'\n'"Press Enter..."
+    sleep 2
+}
+
+# ═══════════════════════════════════════════════════
+# VIEW STATUS
+# ═══════════════════════════════════════════════════
+view_status() {
+    banner
+    echo -e "${CYAN}══════ STATUS ══════${NC}\n"
+    
+    find_interface
+    
+    echo -e "${YELLOW}Interface:${NC} $INTERFACE"
+    echo -e "${YELLOW}TTL:${NC} $(cat /proc/sys/net/ipv4/ip_default_ttl 2>/dev/null || echo Unknown)"
+    echo -e "${YELLOW}IP Forward:${NC} $(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 0)"
+    
+    echo -e "\n${CYAN}Connected Devices:${NC}"
+    local count=$(get_clients | wc -l)
+    echo -e "${GREEN}$count devices connected${NC}"
+    
+    if [ -s "$SPEED_DB" ]; then
+        echo -e "\n${CYAN}Speed Limited:${NC}"
+        cat "$SPEED_DB"
+    fi
+    
+    if [ -s "$BLOCK_DB" ]; then
+        echo -e "\n${CYAN}Blocked:${NC}"
+        cat "$BLOCK_DB"
+    fi
+    
+    read -p $'\n'"Press Enter to continue..."
 }
 
 # ═══════════════════════════════════════════════════
 # MAIN MENU
 # ═══════════════════════════════════════════════════
-main() {
-    # Init
-    mkdir -p "$CONFIG_DIR"
-    touch "$SPEED_DB" "$BLOCK_DB"
-    
+main_menu() {
     while true; do
         banner
-        find_interface
         
-        echo -e "${CYAN}Interface:${NC} $IFACE"
-        echo -e "${CYAN}IP:${NC} ${IP:-Not detected}"
-        echo -e "${CYAN}Root:${NC} $([ $ROOT -eq 1 ] && echo -e "${GREEN}YES${NC}" || echo -e "${RED}NO${NC}")"
-        
-        echo -e "\n${CYAN}═══════════════════════════════════════════════════${NC}"
-        echo -e "${CYAN}1.${NC} Speed Control ${GREEN}[FIXED]${NC}"
-        echo -e "${CYAN}2.${NC} Block Device"
-        echo -e "${CYAN}3.${NC} Unblock Device"
-        echo -e "${CYAN}4.${NC} Kick Device"
-        echo -e "${CYAN}5.${NC} Monitor"
-        echo -e "${CYAN}6.${NC} Minecraft Server"
+        echo -e "${CYAN}1.${NC} View Connected Devices"
+        echo -e "${CYAN}2.${NC} Speed Limit (50KB/s)"
+        echo -e "${CYAN}3.${NC} Block Device"
+        echo -e "${CYAN}4.${NC} Unblock Device"
+        echo -e "${CYAN}5.${NC} Kick Device"
+        echo -e "${CYAN}6.${NC} TTL Settings"
+        echo -e "${CYAN}7.${NC} View Status"
         echo -e "${CYAN}0.${NC} Exit"
-        echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
         
-        read -p $'\n'"Choose: " opt
+        read -p $'\n'"Choose: " choice
         
-        case $opt in
-            1) speed_control ;;
-            2) block_device ;;
-            3) unblock_device ;;
-            4) kick_device ;;
-            5) monitor ;;
-            6) minecraft ;;
-            0) echo -e "\n${CYAN}By: senzore ganteng${NC}\n"; exit ;;
+        case $choice in
+            1)
+                banner
+                echo -e "${CYAN}══════ CONNECTED DEVICES ══════${NC}\n"
+                list_clients
+                read -p $'\n'"Press Enter to continue..."
+                ;;
+            2) limit_speed ;;
+            3) block_device ;;
+            4) unblock_device ;;
+            5) kick_device ;;
+            6) set_ttl ;;
+            7) view_status ;;
+            0)
+                echo -e "\n${CYAN}By: senzore ganteng${NC}\n"
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}Invalid option${NC}"
+                sleep 1
+                ;;
         esac
     done
 }
 
-# START
-banner
-echo -e "${CYAN}Starting...${NC}\n"
-check_root
-sleep 1
+# ═══════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════
+main() {
+    # Create config directory
+    mkdir -p "$CONFIG_DIR"
+    touch "$SPEED_DB" "$BLOCK_DB"
+    
+    banner
+    echo -e "${CYAN}Initializing...${NC}\n"
+    
+    check_root
+    
+    echo -e "${GREEN}[✓] Ready${NC}\n"
+    echo -e "${YELLOW}TTL forced to 65 (bypass carrier detection)${NC}"
+    
+    sleep 2
+    
+    main_menu
+}
+
+# Start
 main
